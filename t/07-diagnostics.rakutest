@@ -1,0 +1,57 @@
+use Test;
+use lib 't/lib';
+use Compile;
+
+for <warn-on-mismatch warn-on-unverifiable> -> $mode {
+    my ($code, $output) = compile(
+        'sub a(--> Int:D) { Int }; sub b(--> Int) { "bad" }', :$mode);
+    is $code, 0, "$mode permits compilation";
+    like $output, /'return from a'/, "$mode emits first warning";
+    like $output, /'return from b'/, "$mode emits subsequent warnings";
+    unlike $output, /'.precomp/'/, "$mode hides precompiled implementation frames";
+    unlike $output, /'lib/static.rakumod'/, "$mode hides source implementation frames";
+    unlike $output, /'in sub check-unit'/, "$mode hides checker routine";
+}
+
+for <fail-on-mismatch fail-on-unverifiable> -> $mode {
+    my ($code, $output) = compile(q:to/RAKU/, :$mode);
+sub f(Int $x) { 1 }
+sub text() { "bad" }
+f(text());
+die "MAINLINE EXECUTED";
+RAKU
+    isnt $code, 0, "$mode rejects the compilation unit";
+    like $output, /'===SORRY!==='/, 'uses the standard compilation error heading';
+    like $output, /'[static:mismatch]'/, 'keeps the type diagnostic';
+    like $output, /'at -e:4'/, 'points to the incompatible call line';
+    like $output, /'------>' \N* 'f(text())'/, 'includes the offending source excerpt';
+    unlike $output, /'evaluating a CHECK'/, 'no CHECK exception wrapper';
+    unlike $output, /'Exception details:'/ , 'no nested exception dump';
+    unlike $output, /'in sub check-unit'/, 'no checker implementation frames';
+    unlike $output, /'src/Raku/ast/'/, 'no compiler implementation frames';
+    unlike $output, /'MAINLINE EXECUTED'/, 'still fails before runtime';
+}
+my ($code, $output) = compile('sub text() { "bad" }; my Int $a = text(); my Int $b = text()');
+isnt $code, 0, 'multiple errors still fail compilation';
+like $output, /'initialization of $a'/, 'keeps first collected diagnostic';
+like $output, /'initialization of $b'/, 'keeps second collected diagnostic';
+
+# Check that compiler registration retains the structured aggregate, rather
+# than converting the diagnostic into an untyped printed string.
+my $proc = run $*EXECUTABLE, '-Ilib', '-e', q:to/RAKU/, :out, :err;
+use static :DEFAULT, :types;
+CHECK {
+    my @diagnostics = fail-on-mismatch;
+    my $error = $*CU.sorries.first(* ~~ CheckFailure);
+    die "lost structured diagnostics" unless $error.defined
+        && $error ~~ X::Comp && $error.diagnostics.elems == @diagnostics.elems
+        && @diagnostics.elems == 1;
+}
+sub text() { "bad" }
+my Int $x = text();
+RAKU
+my $out = $proc.out.slurp(:close) ~ $proc.err.slurp(:close);
+isnt $proc.exitcode, 0, 'registered error rejects compilation';
+unlike $out, /'lost structured diagnostics'/, 'compiler error retains structured diagnostics';
+like $out, /'[static:mismatch]'/, 'registered aggregate remains a normal compiler diagnostic';
+done-testing;

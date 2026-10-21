@@ -1,0 +1,27 @@
+use Test;
+use lib 't/lib';
+use Compile;
+
+for <warn-on-mismatch fail-on-mismatch warn-on-unverifiable fail-on-unverifiable> -> $mode {
+    my ($code, $output) = compile('sub text() { "wrong" }; my Int $value = text();', :$mode);
+    is $code == 0, $mode.starts-with('warn'), "$mode uses the requested severity";
+    like $output, /'[static:mismatch]'/, "$mode reports mismatches";
+    like $output, /'expected Int, got Str:D'/, 'diagnostic contains expected and actual types';
+}
+for <warn-on-mismatch fail-on-mismatch warn-on-unverifiable fail-on-unverifiable> -> $mode {
+    my ($code, $output) = compile('sub identity($value) { $value }; my Int $value = identity(1);', :$mode);
+    is $code == 0, $mode ne 'fail-on-unverifiable', "$mode handles an Any return";
+    is so $output.contains('[static:unverifiable]'), $mode.ends-with('unverifiable'), 'uncertainty is selected by policy';
+}
+my ($code, $output) = compile('sub integer() { 42 }; my Int $value = integer(); die "RUNTIME EXECUTED";', :mode<fail-on-unverifiable>);
+is $code, 0, 'a fully verifiable program compiles';
+unlike $output, /'RUNTIME EXECUTED'/, 'the mainline does not execute';
+($code, $output) = compile('sub text() { "bad" }; my Int $a = text(); my Int $b = text();');
+is $code, 1, 'mismatches fail compilation';
+like $output, /'initialization of $a'/, 'first error collected';
+like $output, /'initialization of $b'/, 'second error collected';
+like $output, /'-e:2'/, 'source line is included';
+my $invalid = run $*EXECUTABLE, '-Ilib', '-e', 'use static; fail-on-mismatch(42)', :out, :err;
+isnt $invalid.exitcode, 0, 'invalid input fails';
+like $invalid.err.slurp, /'must be called in CHECK'/, 'invalid input has an actionable message';
+done-testing;

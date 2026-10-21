@@ -1,0 +1,104 @@
+use Test;
+
+my $dir = $*TMPDIR.add("static-cli-{$*PID}-{now.Int}");
+$dir.mkdir;
+sub remove-tree($path) {
+    if $path.d { remove-tree($_) for $path.dir; $path.rmdir }
+    else { $path.unlink }
+}
+LEAVE remove-tree($dir);
+my $good = $dir.add('good.raku');
+my $bad = $dir.add('bad.raku');
+$good.spurt(q:to/GOOD/);
+use v6.d;
+unit module Example;
+class C { method value() { 42 } }; C.new.value();
+say 'RUNTIME-MARKER';
+=finish
+ignored data
+GOOD
+$bad.spurt(q:to/BAD/);
+use v6.d;
+class C {};
+C.new.missing();
+BAD
+
+sub cli(@args, Str :$stdin = '', :@include = []) {
+    my $out = $dir.add('stdout');
+    my $err = $dir.add('stderr');
+    my $input = $dir.add('stdin');
+    $input.spurt($stdin);
+    my $i = $input.open(:r);
+    my $o = $out.open(:w);
+    my $e = $err.open(:w);
+    my $p = run $*EXECUTABLE, |@include.map({ '-I' ~ $_ }),
+        'bin/static-check.raku', |@args, :in($i), :out($o), :err($e);
+    .close for $i, $o, $e;
+    ($p.exitcode, $out.slurp ~ $err.slurp)
+}
+
+my ($exit, $out) = cli([$good.Str]);
+is $exit, 0, 'version, unit and finish work without source changes';
+nok $out.contains('RUNTIME-MARKER'), 'mainline does not run';
+($exit, $out) = cli([$bad.Str]);
+is $exit, 1, 'bad method fails by default';
+ok $out.contains('[static:mismatch]'), 'checker ran without use static';
+ok $out.contains($bad.Str ~ ':3'), 'original filename and line retained';
+nok $out.contains('evaluating a CHECK'), 'normal compiler diagnostic';
+($exit, $out) = cli([], :stdin('class C {}; C.new.missing()'));
+is $exit, 1, 'stdin is default';
+ok $out.contains('[static:mismatch]'), 'stdin checked';
+($exit, $out) = cli(['-'], :stdin("say 'RUNTIME-MARKER'"));
+is $exit, 0, 'explicit stdin';
+nok $out.contains('RUNTIME-MARKER'), 'stdin mainline does not run';
+($exit, $out) = cli([$bad.Str, $good.Str]);
+is $exit, 1, 'multiple files aggregate failure';
+ok $out.contains('Syntax OK'), 'continues after a failed file';
+($exit, $out) = cli(['--/check-methods', $bad.Str]);
+is $exit, 0, 'method existence can be disabled';
+($exit, $out) = cli(['--policy=warn-on-mismatch', $bad.Str]);
+is $exit, 0, 'warning policy succeeds';
+ok $out.contains('[static:mismatch]'), 'warning emitted';
+($exit, $out) = cli(['--policy=fail-on-unverifiable'], :stdin('my $x = prompt "type?"; $x.foo()'));
+is $exit, 1, 'strict policy rejects uncertain calls';
+ok $out.contains('[static:unverifiable]'), 'strict diagnostic';
+($exit, $out) = cli(['--policy=invalid']);
+is $exit, 2, 'invalid policy is usage error';
+($exit, $out) = cli([$dir.add('absent').Str, $good.Str]);
+is $exit, 1, 'missing file fails';
+ok $out.contains('Syntax OK'), 'continues after missing file';
+($exit, $out) = cli(['-', '-']);
+is $exit, 2, 'reject repeated stdin';
+($exit, $out) = cli(['--/external-signatures'], :stdin('class C {}; C.missing()'));
+is $exit, 1, 'external signature option preserves exact method checks';
+($exit, $out) = cli([], :stdin('my $x = ;'));
+is $exit, 1, 'ordinary syntax errors fail';
+my $imported = $dir.add('Unchecked.rakumod');
+$imported.spurt('unit module Unchecked; sub unchecked() { class C {}; C.new.missing() }');
+my $consumer = $dir.add('consumer.raku');
+$consumer.spurt('use lib ' ~ $dir.Str.raku ~ '; use Unchecked;');
+($exit, $out) = cli([$consumer.Str]);
+is $exit, 0, 'only the requested unit is analyzed, not imported bodies';
+$consumer.spurt('use Unchecked;');
+($exit, $out) = cli([$consumer.Str], :include(['lib', $dir.Str]));
+is $exit, 0, 'interpreter -I paths forwarded to child compiler';
+($exit, $out) = cli([], :include(['lib', $dir.Str]), :stdin('use Unchecked;'));
+is $exit, 0, 'interpreter -I paths also work for stdin';
+my $libs = $dir.add('module path');
+$libs.mkdir;
+$libs.add('First.rakumod').spurt('unit module First; sub first-value(--> Int) is export { 1 }');
+$libs.add('Second.rakumod').spurt('unit module Second; sub second-value(--> Int) is export { 2 }');
+for ['-Ilib', '-I' ~ $libs, '-MFirst', '-MSecond'],
+    ['-I', 'lib', '-I', $libs.Str, '-M', 'First', '-M', 'Second'],
+    ['-I=lib', '-I=' ~ $libs, '-M=First', '-M=Second'] -> @options {
+    ($exit, $out) = cli(@options, :stdin('my Int $n = first-value() + second-value();'));
+    is $exit, 0, 'repeated script -I and -M options load exports: ' ~ @options.raku;
+}
+($exit, $out) = cli(['-I' ~ $libs, '-MFirst'], :stdin('my Str $n = first-value();'));
+is $exit, 1, 'injected module signatures are checked';
+ok $out.contains('[static:mismatch]'), 'checker sees injected exports';
+for '-I', '-M' -> $option {
+    ($exit, $out) = cli([$option]);
+    is $exit, 2, "$option requires an argument";
+}
+done-testing;

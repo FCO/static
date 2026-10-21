@@ -1,0 +1,33 @@
+{
+  "auth": "zef:FCO",
+  "authors": [
+    "Fernando Correa de Oliveira"
+  ],
+  "build-depends": [
+  ],
+  "depends": [
+  ],
+  "description": "Opt-in compile-time type checking for the current RakuAST compilation unit",
+  "license": "Artistic-2.0",
+  "name": "static",
+  "perl": "6.d",
+  "provides": {
+    "static": "lib/static.rakumod",
+    "static::Analyzer": "lib/static/Analyzer.rakumod",
+    "static::CLI": "lib/static/CLI.rakumod",
+    "static::Predicates": "lib/static/Predicates.rakumod",
+    "static::Types": "lib/static/Types.rakumod"
+  },
+  "resources": [
+  ],
+  "source-url": "https://github.com/FCO/static.git",
+  "tags": [
+    "RakuAST",
+    "types",
+    "static-analysis",
+    "compile-time"
+  ],
+  "test-depends": [
+  ],
+  "version": "0.0.1"
+}

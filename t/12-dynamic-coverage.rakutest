@@ -1,0 +1,44 @@
+use Test;
+use lib 't/lib';
+use Compile;
+my @cases =
+    ['role invocant', 'role R { method value() {1} }; class C does R {}; sub f(R $x) { $x.value() }; f(C.new)'],
+    ['private role method', 'role R { method !v() {1}; method v() { self!v() } }; class C does R {}; C.new.v()'],
+    ['given and when', 'my Int $x=1; given $x { when Int { my Int $y=1 }; default {} }'],
+    ['exception path', 'sub f() { try { die "x" }; 1 }; my Int $x=f()'],
+    ['exception handler', 'sub f() { CATCH { default {} }; die "x" }; f()'],
+    ['gather', 'my $x=gather { take 1 }; my Int $n=$x.head'],
+    ['async start', 'my $p=start { 1 }; my Int $n=await $p'],
+    ['supply', 'my $s=supply { emit 1 }'],
+    ['EVAL', 'use MONKEY-SEE-NO-EVAL; my Int $x=EVAL "1"'],
+    ['quoted method', 'my $m="chars"; my Int $x="abc"."$m"()'],
+    ['hyper method', 'my @a="a","b"; my @b=@a».chars'],
+    ['array shape', 'my Int @a[2]=1,2'],
+    ['destructuring declaration', 'my (Int $x, Str $y) = 1,"s"'];
+for @cases -> [$name, $source] {
+    my $supported = $name eq any('given and when','exception path','exception handler','gather','async start','supply','hyper method','array shape','destructuring declaration');
+    for <fail-on-mismatch fail-on-unverifiable> -> $mode {
+        my ($code, $out) = compile($source, :$mode);
+        is $code == 0, $supported || $mode eq 'fail-on-mismatch', "$name / $mode";
+        if !$supported && $mode eq 'fail-on-unverifiable' { like $out, /'[static:unverifiable]'/, "$name is explicitly inconclusive" }
+        else { unlike $out, /'[static:mismatch]'/, "$name is not a proven incompatibility" }
+        unlike $out, /'while evaluating a CHECK'/, "$name does not crash the checker";
+        diag $out if ($code == 0) != ($supported || $mode eq 'fail-on-mismatch');
+    }
+}
+# Reusing the analysis service must not reuse another unit's facts/reports.
+my $p = run $*EXECUTABLE, '-Ilib', '-c', '-e', q:to/RAKU/, :out, :err;
+use static::Analyzer;
+CHECK {
+    my $analyzer=static::Analyzer.new;
+    my @first=$analyzer.analyze($*CU);
+    my @second=$analyzer.analyze($*CU);
+    die 'analysis state leaked' unless @first.elems == @second.elems;
+}
+sub value() { 1 }
+my Int $x=value();
+RAKU
+my $text = $p.out.slurp(:close) ~ $p.err.slurp(:close);
+is $p.exitcode, 0, 'analysis service can be reused without accumulated state';
+unlike $text, /'analysis state leaked'/, 'no stale diagnostics';
+done-testing;

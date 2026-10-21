@@ -1,0 +1,55 @@
+use Test;
+use lib 't/lib';
+use Compile;
+my @cases =
+    ['generic identity', 'sub f(::T $x --> T) { $x }; my Int $x = f(1)', 'ok'],
+    ['generic same types', 'sub f(::T $x, T $y --> T) { $x }; my Int $x = f(1,2)', 'ok'],
+    ['generic incompatible types', 'sub f(::T $x, T $y --> T) { $x }; f(1,"s")', 'mismatch'],
+    ['generic runtime subtype', 'sub f(::T $x, T $y --> T) {$x}; sub g(Int $x) { f($x,1) }', 'unverifiable'],
+    ['generic runtime return', 'sub f(::T $x --> T) {$x}; sub g(Int $x) { my Int $y=f($x) }', 'unverifiable'],
+    ['generic return mismatch', 'sub f(::T $x --> T) { $x }; my Int $x = f("s")', 'mismatch'],
+    ['generic container unresolved', 'sub f(::T $x, Array[T] $y) { 1 }; f(1,[1])', 'unverifiable'],
+    ['multi specificity', 'multi sub f(Int $x) { 1 }; multi sub f(Any $x) { "s" }; my Int $x = f(1)', 'ok'],
+    ['multi fallback', 'multi sub f(Int $x) { 1 }; multi sub f(Any $x) { "s" }; my Int $x = f("s")', 'mismatch'],
+    ['multi constrained specificity', 'multi sub f(Int $x where * > 0) { 1 }; multi sub f(Int $x) { "s" }; my Int $x = f(1)', 'ok'],
+    ['multi constrained fallback', 'multi sub f(Int $x where * > 0) { 1 }; multi sub f(Int $x) { "s" }; my Int $x = f(-1)', 'mismatch'],
+    ['multi subsets', 'multi sub f(Int $x where * > 0) { 1 }; multi sub f(Int $x where * < 0) { "s" }; my Int $x = f(-1)', 'mismatch'],
+    ['multi unresolved predicates', 'sub p($x) { True }; multi sub f(Int $x where { p($_) }) { 1 }; multi sub f(Int $x) { 1 }; f(1)', 'unverifiable'],
+    ['missing positional', 'sub f(Int $x) {1}; f()', 'mismatch'],
+    ['extra positional', 'sub f(Int $x) {1}; f(1,2)', 'mismatch'],
+    ['missing named', 'sub f(Int :$x!) {1}; f()', 'mismatch'],
+    ['unexpected named', 'sub f(Int $x) {1}; f(1,:z(1))', 'mismatch'],
+    ['named alias', 'sub f(Int :value(:$x)!) {1}; f(:value(1))', 'ok'],
+    ['slurpy values', 'sub f(*@x) {1}; f(1,2)', 'ok'],
+    ['slurpy constrained', 'sub f(*@x where { @x.all ~~ Int }) {1}; f(1,"s")', 'unverifiable'],
+    ['capture', 'sub f(|c) {1}; f(1,:a(2))', 'ok'],
+    ['destructuring', 'sub f([$x, $y]) {1}; f([1,2])', 'ok'],
+    ['rw argument', 'sub f(Int $x is rw) {1}; my Int $x = 1; f($x)', 'ok'],
+    ['typed array argument', 'sub f(Array[Int] $x) {1}; my Int @a; f(@a)', 'ok'],
+    ['typed array after assignment', 'sub f(Array[Int] $x) {1}; my Int @a; @a=1,2; f(@a)', 'ok'],
+    ['untyped array cannot bind', 'sub f(Array[Int] $x) {1}; f([1,2])', 'mismatch'],
+    ['finite spread', 'sub f(Int $x, Int $y) {1}; f(|(1,2))', 'ok'],
+    ['known array spread', 'sub f(Int $x, Int $y) {1}; my @a=1,2; f(|@a)', 'ok'],
+    ['indirect callable', 'my &f = sub {1}; my Int $x=f()', 'unverifiable'],
+    ['virtual dispatch', 'class C { method value() {1} }; sub f(C $c) { $c.value() }', 'unverifiable'],
+    ['private method', 'class C { method !value() {1}; method value() { self!value() } }; my Int $x=C.new.value()', 'ok'],
+    ['coercion needed', 'sub f(Int(Str) $x) { $x }; f("2")', 'unverifiable'],
+    ['coercion unnecessary', 'sub f(Int(Str) $x) { $x }; my Int $x=f(2)', 'ok'],
+    ['where regex', 'sub f(Str $x where /abc/) {1}; f("abc")', 'unverifiable'],
+    ['dynamic symbol', 'my $name="Int"; my Int $x=::($name)', 'unverifiable'],
+    ['hash composer', 'my %h = a => 1; my Int $x=%h<a>', 'unverifiable'];
+for @cases -> [$name, $source, $status] {
+    for <fail-on-mismatch fail-on-unverifiable> -> $mode {
+        my ($code, $out) = compile($source, :$mode);
+        my $fail = $status eq 'mismatch' || ($status eq 'unverifiable' && $mode eq 'fail-on-unverifiable');
+        is $code == 0, !$fail, "$name / $mode";
+        if $fail { like $out, /'[static:' $status ']'/, "$name classification" }
+        else { unlike $out, /'[static:'/ , "$name has no selected errors" }
+        unlike $out, /'while evaluating a CHECK'/, "$name never crashes the checker";
+        diag $out if ($code == 0) == $fail;
+    }
+}
+my ($code, $out) = compile('sub f(Int *@x) {1}');
+isnt $code, 0, 'Rakudo rejects typed slurpy positional declarations itself';
+like $out, /'Slurpy positional parameters with type constraints are not supported'/, 'native compiler diagnostic is retained';
+done-testing;

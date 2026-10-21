@@ -1,0 +1,24 @@
+use Test;
+use nqp;
+use lib 't/lib';
+use Compile;
+
+# Compare the analyzer with Raku's nominal checks for concrete primitive values.
+# No user predicates or application code are executed to establish this oracle.
+my @values = ['Int', '1', 1], ['Str', '"s"', 's'], ['Rat', '1/2', 1/2],
+    ['Num', '1e0', 1e0], ['Bool', 'True', True];
+my @targets = ['Int', Int], ['Str', Str], ['Rat', Rat], ['Num', Num], ['Bool', Bool],
+    ['Numeric', Numeric], ['Real', Real], ['Cool', Cool], ['Any', Any], ['Mu', Mu],
+    ['Int:D', Int:D], ['Int:U', Int:U];
+for @values -> [$name, $literal, $value] {
+    for @targets -> [$annotation, Mu $type] {
+        my $compatible = so nqp::istype(nqp::decont($value), $type);
+        my ($code, $out) = compile('sub value() { ' ~ $literal ~ ' }; my ' ~ $annotation ~ ' $x = value()', :mode<fail-on-unverifiable>);
+        is $code == 0, $compatible, "$name -> $annotation agrees with Raku";
+        if !$compatible { like $out, /'[static:mismatch]'/, 'incompatible primitive is proven' }
+        else { unlike $out, /'[static:'/ , 'compatible primitive is fully verified' }
+        unlike $out, /'while evaluating a CHECK'/, 'no checker exception';
+        diag $out if ($code == 0) != $compatible;
+    }
+}
+done-testing;

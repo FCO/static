@@ -1,0 +1,42 @@
+use Test;
+use lib 't/lib';
+use Compile;
+
+my @cases =
+    ['forward call', 'my Int $x = later(); sub later() { "bad" }', 1, 'expected Int, got Str:D'],
+    ['untyped parameter', 'sub identity($x) { $x }; my Int $x = identity(1)', 0, ''],
+    ['explicit return', 'sub text() { return "bad"; 1 }; my Int $x = text()', 1, 'got Str:D'],
+    ['implicit and explicit branches', 'sub f(Bool $b) { return 1 if $b; "bad" }; my Int $x = f(True)', 0, ''],
+    ['are produces Real', 'sub f(Bool $b) { $b ?? 1 !! 1/2 }; my Real $x = f(True)', 0, ''],
+    ['are retains alternatives', 'sub f(Bool $b) { $b ?? 1 !! "s" }; my Cool $x = f(True)', 0, ''],
+    ['nested return is isolated', 'sub f() { sub nested() { return "bad" }; 1 }; my Int $x = f()', 0, ''],
+    ['unreachable return excluded', 'sub f() { return 1; return "bad" }; my Int $x = f()', 0, ''],
+    ['mutual recursion', 'sub f(Int $n) { $n ?? g($n - 1) !! 1 }; sub g(Int $n) { f($n) }; my Int $x = g(2)', 0, ''],
+    ['same-name lexicals', 'sub a() { sub value() { "bad" }; value() }; sub b() { sub value() { 1 }; value() }; my Int $x = b()', 0, ''],
+    ['inferred assignment', 'sub text() { "bad" }; my Int $x; $x = text()', 1, 'assignment to $x'],
+    ['flow join', 'my $x = 1; if True { $x = "bad" }; my Int $y = $x', 0, ''],
+    ['declared return checked', 'sub f(--> Int) { "bad" }', 1, 'return from f'],
+    ['declared mixed if returns', 'sub a($a --> Int) { do if 1 { "bla" } else { 42 } }', 1, 'expected Int, got Str:D'],
+    ['declared mixed pick returns', 'sub a($a --> Int) { ("bla", 42).pick }', 1, 'expected Int, got Str:D'],
+    ['declared mixed roll returns', 'sub a($a --> Int) { ("bla", 42).roll }', 1, 'expected Int, got Str:D'],
+    ['declared mixed dynamic returns', 'sub f(Bool $b --> Int) { $b ?? "bad" !! 42 }', 1, 'expected Int, got Str:D'],
+    ['declared compatible alternatives', 'sub f(Bool $b --> Cool) { $b ?? "ok" !! 42 }', 0, ''],
+    ['declared Nil alternative', 'sub f(Bool $b --> Int) { $b ?? Nil !! 42 }', 0, ''],
+    ['declared return at call', 'sub f(--> Str) { "s" }; my Int $x = f()', 1, 'expected Int, got Str'],
+    ['definite return', 'sub f() { Int }; my Int:D $x = f()', 1, 'expected Int:D'],
+    ['undefinite return', 'sub f() { 1 }; my Int:U $x = f()', 1, 'expected Int:U'];
+for @cases -> [$name, $source, $expected, $message] {
+    my ($code, $output) = compile($source);
+    is $code, $expected, $name;
+    like $output, /$message/, "$name diagnostic" if $message;
+    diag $output if $code != $expected;
+}
+my ($code, $output) = compile('sub f() { f() }; my Int $x = f()', :mode<fail-on-unverifiable>);
+is $code, 1, 'unproductive recursion is inconclusive';
+like $output, /'[static:unverifiable]'/, 'recursive uncertainty diagnosed';
+($code, $output) = compile('sub f(Bool $b) { $b ?? 1 !! "s" }; my Int $x = f(True)', :mode<fail-on-unverifiable>);
+is $code, 1, 'mixed compatible and incompatible return paths are unverifiable';
+unlike $output, /'[static:mismatch]'/, 'widening is not a proven mismatch';
+($code, $output) = compile('sub f() { for 1..2 { return "bad" }; 1 }; my Int $x = f()', :mode<warn-on-unverifiable>);
+is $code, 0, 'loops terminate analysis';
+done-testing;

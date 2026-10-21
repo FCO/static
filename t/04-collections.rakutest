@@ -1,0 +1,41 @@
+use Test;
+use lib 't/lib';
+use Compile;
+my @cases =
+    ['array initialization', 'sub text() { "bad" }; my Int @a = 1, text()', 1],
+    ['array push', 'my Int @a; @a.push("bad")', 1],
+    ['array append', 'my Int @a; @a.append(1, "bad")', 1],
+    ['array indexed assignment', 'my Int @a; @a[0] = "bad"', 1],
+    ['hash initialization', 'sub text() { "bad" }; my Int %h = x => text()', 1],
+    ['literal hash indexed assignment', 'my Int %h; %h<x> = "bad"', 1],
+    ['hash indexed assignment', 'my Int %h; %h{"x"} = "bad"', 1],
+    ['array reassignment', 'my Int @a; @a = 1, "bad"', 1],
+    ['hash reassignment', 'my Int %h; %h = x => "bad"', 1],
+    ['valid collection reassignment', 'my Int @a; @a = 1, 2; my Int %h; %h = x => 1', 0],
+    ['binding preserves container type', 'my Int @a := [1, 2]', 1],
+    ['valid collections', 'my Int @a = 1, 2; @a.push(3); my Int %h = x => 1; %h<x> = 2', 0],
+    ['parameterized contract', 'sub f(Array[Int] $x) { 1 }; my Int @a; f(@a)', 0];
+for @cases -> [$name, $source, $expected] {
+    my ($code, $output) = compile($source);
+    is $code, $expected, $name;
+    like $output, /'[static:mismatch]'/, "$name diagnosed by static" if $expected;
+    diag $output if $code != $expected;
+}
+for (
+    ['homogeneous pick', 'sub f(--> Int) { (1, 2).pick }', 0],
+    ['compatible mixed pick', 'sub f(--> Cool) { ("a", 2).pick }', 0],
+    ['empty pick', 'sub f(--> Int) { [].pick }', 0],
+    ['array pick', 'sub f(--> Int) { my @a = "a", 2; @a.pick }', 1],
+    ['custom pick', 'class C { method pick(--> Str) { "a" } }; sub f(--> Str) { C.new.pick }', 0],
+    ['homogeneous roll', 'sub f(--> Int) { (1, 2).roll }', 0],
+    ['compatible mixed roll', 'sub f(--> Cool) { ("a", 2).roll }', 0],
+    ['empty roll', 'sub f(--> Int) { [].roll }', 0],
+    ['array roll', 'sub f(--> Int) { my @a = "a", 2; @a.roll }', 1],
+    ['custom roll', 'class C { method roll(--> Str) { "a" } }; sub f(--> Str) { C.new.roll }', 0],
+) -> [$name, $source, $expected] {
+    my ($code, $output) = compile($source, :mode<fail-on-unverifiable>);
+    is $code, $expected, $name;
+    like $output, /'[static:mismatch]'/, "$name diagnosed by static" if $expected;
+    diag $output if $code != $expected;
+}
+done-testing;

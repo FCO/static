@@ -1,0 +1,25 @@
+use Test;
+use lib 't/lib';
+use Compile;
+my @cases =
+    ['typed positional', 'sub f(Int $x) { 1 }; sub text() { "bad" }; f(text())', 1],
+    ['typed named', 'sub f(Int :$x!) { 1 }; sub text() { "bad" }; f(:x(text()))', 1],
+    ['defined positional', 'sub f(Int:D $x) { 1 }; sub value() { Int }; f(value())', 1],
+    ['undefined named', 'sub f(Int:U :$x!) { 1 }; sub value() { 1 }; f(:x(value()))', 1],
+    ['defined invocant', 'class C { method f(C:D:) { 1 } }; C.f()', 1],
+    ['optional and slurpy', 'sub f(Int $x = 1, *@rest, *%named) { 1 }; f(); f(1, "x", :a(2))', 0],
+    ['matching multi', 'multi sub f(Int $x) { 1 }; multi sub f(Str $x) { "s" }; my Int $x = f(1)', 0],
+    ['multi inferred return', 'multi sub f(Int $x) { 1 }; multi sub f(Str $x) { "s" }; my Int $x = f("s")', 1],
+    ['multi no match', 'multi sub f(Int $x) { 1 }; multi sub f(Str $x) { "s" }; sub value() { [] }; f(value())', 1],
+    ['method return', 'class C { method value() { "bad" } }; my Int $x = C.new.value()', 1],
+    ['method arguments', 'class C { method f(Int $x) { 1 } }; sub text() { "bad" }; C.new.f(text())', 1],
+    ['inheritance', 'class A {}; class B is A {}; sub f(A $x) { 1 }; f(B.new)', 0],
+    ['role', 'role R {}; class C does R {}; sub f(R $x) { 1 }; f(C.new)', 0],
+    ['attribute initialization', 'sub text() { "bad" }; class C { has Int $.x = text() }', 1];
+for @cases -> [$name, $source, $expected] {
+    my ($code, $output) = compile($source);
+    is $code, $expected, $name;
+    like $output, /'[static:mismatch]'/, "$name diagnosed by static" if $expected;
+    diag $output if $code != $expected;
+}
+done-testing;

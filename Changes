@@ -1,0 +1,24 @@
+Revision history for static
+
+{{$NEXT}}
+  - Disable Mi6 README generation from Pod to preserve the maintained README.md.
+  - Hide the warning emission callback from diagnostic backtraces.
+  - Infer possible element returns of no-argument CORE pick/roll on built-in lists/arrays.
+  - Check each inferred body return alternative against declared return contracts.
+  - Add opt-in CHECK-time RakuAST type analysis of the current compilation unit.
+  - Add warning/failure policies for mismatches and inconclusive checks.
+  - Infer local routine returns with .are and bounded recursive summaries.
+  - Check assignments, calls, methods, multis, returns and typed collections.
+  - Report fatal diagnostics as native compilation errors at the offending expression.
+  - Analyze bounded pure where/subset predicates using propagated constants.
+  - Bind direct generic captures, rank nominal multi candidates and check hash keys.
+  - Track native integer storage, lexical aliases and conservative mutation effects.
+  - Expand policy, signature, primitive type, dynamic syntax and safety coverage.
+  - Check missing methods on exact invocants by default; add :check-methods option.
+  - Add bin/static-check.raku for compile-only validation of files or stdin,
+    with selectable policies and the existing checker options.
+  - Accept repeatable -I/-M CLI options and forward interpreter repositories.
+  - Validate readonly/rw parameter contracts, finite destructuring and fixed
+    array dimensions, with lexical and element binding checks.
+  - Analyze given/when paths, exception handlers, deferred producer payloads,
+    supply callback contracts and finite hyper operations conservatively.

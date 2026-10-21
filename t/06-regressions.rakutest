@@ -1,0 +1,35 @@
+use Test;
+use lib 't/lib';
+use Compile;
+my @cases =
+    ['typed method in strict mode', 'class C { method m(Int $x) { $x } }; my Int $x = C.new.m(1)', 'fail-on-unverifiable', 0, ''],
+    ['default parameter', 'sub text() { "bad" }; sub f(Int $x = text()) { 1 }', 'fail-on-mismatch', 1, 'default for parameter $x'],
+    ['returns trait', 'sub f() returns Int { "bad" }', 'fail-on-mismatch', 1, 'return from f'],
+    ['Nil initialization', 'my Int $x = Nil', 'fail-on-unverifiable', 0, ''],
+    ['Nil return exception', 'sub f(--> Int) { Nil }', 'fail-on-unverifiable', 0, ''],
+    ['Bool arithmetic promotion', 'sub f() { True + True }; my Int $x = f()', 'fail-on-unverifiable', 0, ''],
+    ['Bool arithmetic is not Bool', 'sub f() { True + True }; my Bool $x = f()', 'fail-on-unverifiable', 1, '[static:mismatch]'],
+    ['constructor attribute', 'class C { has Int $.x }; sub text() { "bad" }; C.new(:x(text()))', 'fail-on-mismatch', 1, 'constructor attribute x'],
+    ['closure bodies checked', 'sub text() { "bad" }; my &f = { my Int $x = text() }', 'fail-on-mismatch', 1, 'initialization of $x'],
+    ['closure return isolation', 'sub f() { my &callback = { return "bad" }; 1 }; my Int $x = f()', 'fail-on-unverifiable', 0, ''],
+    ['bare block result', 'sub f() { { "bad" } }; my Int $x = f()', 'fail-on-mismatch', 1, 'initialization of $x'],
+    ['are Real diagnostic', 'sub f(Bool $b) { $b ?? 1 !! 1/2 }; my Date $x = f(True)', 'fail-on-mismatch', 1, 'got Real:D'],
+    ['are Cool diagnostic', 'sub f(Bool $b) { $b ?? 1 !! "s" }; my Date $x = f(True)', 'fail-on-mismatch', 1, 'got Cool:D'],
+    ['short circuit side effects', 'my $x = 1; False && ($x = "s"); my Int $i = $x', 'fail-on-mismatch', 0, ''],
+    ['elsif condition side effects', 'my $x = 1; if False {} elsif ($x = "s") {}; my Str $s = $x', 'fail-on-mismatch', 0, ''],
+    ['private attribute return', 'class C { has Int $!x; method value() { $!x } }; my Int $x = C.new.value()', 'fail-on-unverifiable', 0, ''],
+    ['private attribute write', 'class C { has Int $!x; method set() { $!x = text() } }; sub text() { "bad" }', 'fail-on-mismatch', 1, 'assignment to attribute $!x'],
+    ['virtual method return', 'class A { method value() { "s" } }; class B is A { method value() { 1 } }; sub f(A $a) { my Int $x = $a.value() }; f(B.new)', 'fail-on-mismatch', 0, ''],
+    ['strict virtual method return', 'class A { method value() { "s" } }; sub f(A $a) { my Int $x = $a.value() }', 'fail-on-unverifiable', 1, 'runtime subclass'];
+for @cases -> [$name, $source, $mode, $expected, $message] {
+    my ($code, $output) = compile($source, :$mode);
+    is $code, $expected, $name;
+    like $output, /$message/, "$name diagnostic" if $message;
+    diag $output if $code != $expected;
+}
+for ^2 -> $pass {
+    my ($code, $output) = compile('use StaticChecked; my Int $x = checked()', :mode<fail-on-unverifiable>);
+    is $code, 0, "opted-in module works with precompilation (pass $pass)";
+    unlike $output, /'[static:'/ , 'no diagnostics leaked from a different compilation unit';
+}
+done-testing;

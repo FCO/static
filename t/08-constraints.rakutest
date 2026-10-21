@@ -1,0 +1,58 @@
+use Test;
+use lib 't/lib';
+use Compile;
+
+# Each entry fixes both the nominal policy and the strict policy: uncertainty
+# must not be silently promoted to success or to a proven mismatch.
+my @cases =
+    ['positive where', 'sub f(Int $x where * > 0) { 1 }; f(2)', 'ok'],
+    ['negative where', 'sub f(Int $x where * > 0) { 1 }; f(-2)', 'mismatch'],
+    ['named where', 'sub f(Int :$x! where * > 0) { 1 }; f(:x(-2))', 'mismatch'],
+    ['block topic', 'sub f(Int $x where { $_ > 0 }) { 1 }; f(-2)', 'mismatch'],
+    ['block parameter', 'sub f(Int $x where { $x > 0 }) { 1 }; f(-2)', 'mismatch'],
+    ['placeholder', 'sub f(Int $x where { $^n > 0 }) { 1 }; f(-2)', 'mismatch'],
+    ['boolean compound', 'sub f(Int $x where { $_ > 0 && $_ < 10 }) { 1 }; f(20)', 'mismatch'],
+    ['even predicate', 'sub f(Int $x where * %% 2) { 1 }; f(3)', 'mismatch'],
+    ['range accept', 'sub f(Int $x where 1..10) { 1 }; f(2)', 'ok'],
+    ['range reject', 'sub f(Int $x where 1..10) { 1 }; f(20)', 'mismatch'],
+    ['excluded end', 'sub f(Int $x where 1..^10) { 1 }; f(10)', 'mismatch'],
+    ['literal value', 'sub f(Int $x where 42) { 1 }; f(41)', 'mismatch'],
+    ['literal string', 'sub f(Str $x where "yes") { 1 }; f("no")', 'mismatch'],
+    ['string length', 'sub f(Str $x where *.chars > 2) { 1 }; f("a")', 'mismatch'],
+    ['type junction accept', 'sub f($x where Int|Str) { 1 }; f("s")', 'ok'],
+    ['type junction reject', 'sub f($x where Int|Str) { 1 }; f([])', 'mismatch'],
+    ['variable where accept', 'my Int $x where * > 0 = 2', 'ok'],
+    ['variable where reject', 'my Int $x where * > 0 = -2', 'mismatch'],
+    ['variable where write', 'my Int $x where * > 0 = 2; $x = -2', 'mismatch'],
+    ['subset accept', 'subset Positive of Int where * > 0; my Positive $x = 2', 'ok'],
+    ['subset reject', 'subset Positive of Int where * > 0; my Positive $x = -2', 'mismatch'],
+    ['nested subset', 'subset Positive of Int where * > 0; subset Small of Positive where * < 10; my Small $x = 20', 'mismatch'],
+    ['subset return', 'subset Positive of Int where * > 0; sub f(--> Positive) { -2 }', 'mismatch'],
+    ['subset argument', 'subset Positive of Int where * > 0; sub f(Positive $x) { 1 }; f(-2)', 'mismatch'],
+    ['constraint default', 'sub f(Int $x where * > 0 = -1) { 1 }', 'mismatch'],
+    ['constant return', 'sub value() { -2 }; sub f(Int $x where * > 0) { 1 }; f(value())', 'mismatch'],
+    ['constant arithmetic', 'sub f(Int $x where * > 0) { 1 }; f(1 - 3)', 'mismatch'],
+    ['unknown parameter', 'sub f(Int $x where * > 0) { 1 }; sub g(Int $n) { f($n) }', 'unverifiable'],
+    ['opaque predicate', 'sub test($x) { $x > 0 }; sub f(Int $x where { test($_) }) { 1 }; f(2)', 'unverifiable'],
+    ['subset opaque predicate', 'subset Positive of Int where { die ("PREDICATE" ~ " EXECUTED") }; my Positive $x = 1', 'unverifiable'],
+    ['native integer', 'my int $x = 2', 'ok'],
+    ['native narrowing wraps', 'my int8 $x = 300; sub f(Int $n where * == 44) { 1 }; f($x)', 'ok'],
+    ['native unsigned wraps', 'my uint8 $x = -1; sub f(Int $n where * == 255) { 1 }; f($x)', 'ok'],
+    ['native nominal mismatch', 'sub value() { "s" }; my int8 $x = value()', 'mismatch'],
+    ['typed hash key accept', 'my Int %h{Str}; %h{"x"} = 1', 'ok'],
+    ['typed hash key reject', 'my Int %h{Int}; %h{"x"} = 1', 'mismatch'],
+    ['typed hash key initialization', 'my Int %h{Int} = x => 1', 'mismatch'];
+
+for @cases -> [$name, $source, $status] {
+    for <warn-on-mismatch fail-on-mismatch warn-on-unverifiable fail-on-unverifiable> -> $mode {
+        my ($code, $out) = compile($source, :$mode);
+        my $selected = $status eq 'mismatch' || ($status eq 'unverifiable' && $mode.ends-with('unverifiable'));
+        my $fails = $selected && $mode.starts-with('fail');
+        is $code == 0, !$fails, "$name / $mode exit";
+        if $selected { like $out, /'[static:' $status ']'/, "$name / $mode classification" }
+        else { unlike $out, /'[static:'/ , "$name / $mode has no selected diagnostic" }
+        unlike $out, /'PREDICATE EXECUTED'/, "$name / $mode does not execute predicates";
+        diag $out if ($code == 0) == $fails;
+    }
+}
+done-testing;

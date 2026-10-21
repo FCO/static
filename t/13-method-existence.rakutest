@@ -1,0 +1,43 @@
+use Test;
+use lib 't/lib';
+use Compile;
+
+my @cases =
+    ['class object', 'class C {}; C.missing()', 'mismatch'],
+    ['instance', 'class C {}; C.new.missing()', 'mismatch'],
+    ['lexical instance', 'class C {}; my $c=C.new; $c.missing()', 'mismatch'],
+    ['primitive', '42.missing()', 'mismatch'],
+    ['existing', 'class C { method value() { 1 } }; C.new.value()', 'ok'],
+    ['inherited', 'class B { method value() { 1 } }; class C is B {}; C.new.value()', 'ok'],
+    ['qualified method', 'class C { method value() { 1 } }; C.new.C::value()', 'unverifiable'],
+    ['broad receiver', 'class C {}; sub f(C $c) { $c.missing() }', 'unverifiable'],
+    ['FALLBACK', 'class C { method FALLBACK($name, |) { die "must" ~ "notrun" } }; C.new.missing()', 'unverifiable'],
+    ['inherited FALLBACK', 'class B { method FALLBACK($name, |) { 1 } }; class C is B {}; C.new.missing()', 'unverifiable'],
+    ['optional dispatch', 'class C {}; C.new.?missing()', 'unverifiable'],
+    ['all dispatch', 'class C {}; C.new.*missing()', 'unverifiable'];
+for @cases -> [$name, $source, $status] {
+    for <fail-on-mismatch fail-on-unverifiable warn-on-mismatch warn-on-unverifiable> -> $mode {
+        my ($code, $out) = compile($source, :$mode);
+        my $reports = $status eq 'mismatch' || ($status eq 'unverifiable' && $mode.ends-with('unverifiable'));
+        is $code != 0, $reports && $mode.starts-with('fail'), "$name / $mode exit";
+        if $reports { ok $out.contains('[static:' ~ $status ~ ']'), "$name / $mode diagnostic" }
+        else { nok $out.contains('[static:'), "$name / $mode no diagnostic" }
+        nok $out.contains('while evaluating a CHECK'), "$name / $mode compiler diagnostic";
+        nok $out.contains('mustnotrun'), "$name / $mode does not execute methods";
+    }
+}
+for <fail-on-mismatch fail-on-unverifiable warn-on-mismatch warn-on-unverifiable> -> $mode {
+    my ($code, $out) = compile('class C {}; C.new.missing()', :$mode, :options(':!check-methods'));
+    is $code, 0, "$mode can disable method existence checks";
+    nok $out.contains('[static:'), "$mode suppresses absent-method diagnostic";
+}
+my ($code, $out) = compile('class C {}; C.missing()', :options(':!external-signatures'));
+isnt $code, 0, 'method existence is independent of external signatures';
+ok $out.contains('[static:mismatch]'), 'missing method remains a mismatch';
+($code, $out) = compile('class C { method f(Int $x) { 1 } }; C.new.f("bad")', :options(':!check-methods'));
+isnt $code, 0, 'disabling existence checks preserves argument checking';
+ok $out.contains('[static:mismatch]'), 'existing method argument mismatch';
+($code, $out) = compile('class C {}; my Int $x=C.new.missing()', :mode('fail-on-unverifiable'), :options(':!check-methods'));
+isnt $code, 0, 'unknown method return still cannot prove typed assignment';
+ok $out.contains('[static:unverifiable]'), 'unknown return remains inconclusive';
+done-testing;

@@ -1,0 +1,42 @@
+use Test;
+use lib 't/lib';
+use Compile;
+my @cases =
+    ['scalar alias type', 'my Int $x=1; my $y := $x; $y="s"', 'mismatch'],
+    ['alias value follows target', 'my $x=1; my $y := $x; $x="s"; my Int $z=$y', 'mismatch'],
+    ['alias subset', 'my Int $x where * > 0 = 1; my $y := $x; $y=-1', 'mismatch'],
+    ['conditional alias', 'my $x=1; my $y="s"; my $a; if True { $a := $x } else { $a := $y }; my Int $z=$a', 'unverifiable'],
+    ['alias rebinding', 'my Int $x=1; my $y; $y := $x; $y="s"', 'mismatch'],
+    ['rvalue binding', 'my $x := 1', 'ok'],
+    ['untyped array accepts values', 'my $a=[1,2]; $a.push("s")', 'ok'],
+    ['untyped indexed assignment accepts values', 'my $a=[1,2]; $a[0]="s"', 'ok'],
+    ['known array index', 'my $a=[1,2]; my Int:D $x=$a[0]', 'ok'],
+    ['missing array item', 'my $a=[1,2]; my Int:D $x=$a[42]', 'mismatch'],
+    ['mutation drops length assumption', 'my $a=[1,2]; $a.push(3); sub f($x where *.elems == 2) {1}; f($a)', 'unverifiable'],
+    ['mutable call argument', 'sub change($a) { $a.push(3) }; my $a=[1,2]; change($a); sub f($x where *.elems == 2) {1}; f($a)', 'unverifiable'],
+    ['captured assignment', 'my Int $x=1; sub change() { $x=-1 }; change(); sub f(Int $n where * > 0) {1}; f($x)', 'unverifiable'],
+    ['transitive captured assignment', 'my Int $x=1; sub change() { $x=-1 }; sub outer() {change()}; outer(); sub f(Int $n where * > 0) {1}; f($x)', 'unverifiable'],
+    ['rw drops old constant', 'sub change(Int $n is rw) {$n=-1}; my Int $x=1; change($x); sub f(Int $n where * > 0) {1}; f($x)', 'unverifiable'],
+    ['loop widens constants', 'my Int $x=0; while $x < 100 { $x=$x+1 }; sub f(Int $n where * < 20) {1}; f($x)', 'unverifiable'],
+    ['opaque predicate with side effect', 'sub f(Int $x where { die ("EXECUTED" ~ " PREDICATE") }) {1}; f(1)', 'unverifiable'],
+    ['predicate loop is not executed', 'sub f(Int $x where { loop {} }) {1}; f(1)', 'unverifiable'],
+    ['predicate statement execution is refused', 'sub f(Int $x where { die ("EXECUTED" ~ " PREDICATE"); $_ > 0 }) {1}; f(1)', 'unverifiable'],
+    ['large exponent is bounded', 'sub f(Int $x where { $_ ** 100000000 > 0 }) {1}; f(2)', 'unverifiable'],
+    ['constant predicate true', 'sub f($x where True) {1}; f(0)', 'ok'],
+    ['constant predicate false', 'sub f($x where False) {1}; f(0)', 'mismatch'],
+    ['predicate block true', 'sub f($x where { True }) {1}; f(0)', 'ok'],
+    ['predicate block false', 'sub f($x where { False }) {1}; f(1)', 'mismatch'],
+    ['overloaded comparison not executed', 'sub infix:«>»(Int $a, Int $b) { die ("EXECUTED" ~ " PREDICATE") }; sub f(Int $x where * > 0) {1}; f(1)', 'unverifiable'];
+for @cases -> [$name, $source, $status] {
+    for <fail-on-mismatch fail-on-unverifiable> -> $mode {
+        my ($code, $out) = compile($source, :$mode);
+        my $fail = $status eq 'mismatch' || ($status eq 'unverifiable' && $mode eq 'fail-on-unverifiable');
+        is $code == 0, !$fail, "$name / $mode";
+        if $fail { like $out, /'[static:' $status ']'/, "$name classification" }
+        else { unlike $out, /'[static:'/ , "$name has no selected errors" }
+        unlike $out, /'while evaluating a CHECK'/, "$name never crashes the checker";
+        unlike $out, /'EXECUTED PREDICATE'/, "$name never executes the predicate";
+        diag $out if ($code == 0) == $fail;
+    }
+}
+done-testing;
