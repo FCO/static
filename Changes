@@ -1,6 +1,8 @@
 Revision history for static
 
 {{$NEXT}}
+
+0.0.1  2026-10-22T01:08:37+01:00
   - Disable Mi6 README generation from Pod to preserve the maintained README.md.
   - Hide the warning emission callback from diagnostic backtraces.
   - Infer possible element returns of no-argument CORE pick/roll on built-in lists/arrays.
