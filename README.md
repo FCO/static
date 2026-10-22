@@ -81,7 +81,9 @@ available.
 
 Method existence is checked by default on known exact class objects and instances,
 including inherited methods. A missing method is a mismatch. Receivers that may
-be subclasses, `FALLBACK`, qualified method names, and optional dispatch (`.?` / `.*`) remain inconclusive;
+be subclasses, qualified method names, and optional dispatch (`.?` / `.*`) remain inconclusive;
+local and inherited `FALLBACK` methods use available signatures and local summaries, while
+constant or finite sets of computed method names use ordinary method checks;
 the checker does not execute dynamic method providers. Disable the existence
 check with any policy:
 
@@ -178,8 +180,9 @@ element types, including `Nil` for a possibly empty scalar selection.
 facts with element contracts and a known cardinality when established; random
 order is never invented, and nonempty `.roll(*)` is recorded as infinite.
 
-CORE `map`, `grep` and `first` analyze known single-element callbacks, including
-inline blocks, routine references and single-argument Whatever expressions.
+CORE `map`, `grep` and `first` analyze known callbacks, including
+inline blocks, routine references and Whatever expressions. Finite `map` inputs
+support multi-argument batches, optional parameters and known Slip flattening.
 Finite inputs retain exact results when established, up to 256 elements;
 larger inputs use element summaries. Lazy sequences and finite captures lose
 content assumptions when a known source or alias changes. Analysis never
@@ -188,20 +191,27 @@ captures use declared contracts and callback writes invalidate caller assumption
 `pop` and `shift` track known removed elements and update shared container
 references. Empty removal yields `Failure`, whose use in a typed assignment is
 checked. Functional CORE forms of `map`, `grep`, `first`, `pick`, `roll`, `pop` and `shift` use
-these rules too. Custom methods retain ordinary dispatch analysis.
+these rules too. `reduce` checks accumulator callbacks; `classify` and `categorize`
+retain known grouped hash entries. Positive constant `rotor` sizes, including
+`:partial`, and functional `zip`/`cross` retain bounded row shapes and cardinality.
+Dynamic defined integer selection counts retain element contracts. Custom methods
+retain ordinary dispatch analysis.
 
 Known lexical routine references and parenthesized callable expressions are
-checked through their resolved signatures and local return summaries. Known
+checked through their resolved signatures and local return summaries, including
+finite alternatives of known callable targets. Known
 closures also bind positional/named/slurpy arguments and propagate captured
 writes. Deferred callbacks with nonlocal returns remain inconclusive. Finite
 captures can supply both positional and named arguments through `|`. Direct
 `::T` captures can be substituted recursively into built-in `Array`, `List`,
 `Positional`, `Hash` and `Associative` contracts, including nested parameters.
-Actual container contracts are respected: an untyped `[1]` is not `Array[Int]`.
+Custom parameterized contracts can reuse matching compiler-created witnesses;
+the analyzer never invokes custom parameterizers. Actual container contracts are respected: an untyped `[1]` is not `Array[Int]`.
 
 Simple local `where`/subset predicates are analyzed using primitive constants,
 comparisons, arithmetic, Boolean combinations, intervals, type junctions,
-`*.chars`, `*.defined`, known collection lengths, and references to previously
+`*.chars`, `*.defined`, bounded primitive string transformations/searches,
+numeric absolute values/rounding/sign, collection lengths/sums/extrema, and references to previously
 bound signature parameters. For example:
 
 ```raku
@@ -241,8 +251,18 @@ Container and effect checks also cover:
   finite compatible shapes. Unequal shapes, recycling and unknown operands
   remain inconclusive.
 
-Collection callbacks with multi-element batching, dynamic counts, arbitrary
-Slip flattening and custom iteration protocols can remain inconclusive. Callback
+Finite serial `for` loops bind elements to callback parameters or the topic.
+Known conditions and bounded state transitions model empty loops, repeat loops,
+`last`/`next`, always-returning paths and simple infinite loops. Enumeration and
+loop simulation are limited to 256 steps; other loops use conservative widening.
+Known eager callbacks propagate nonlocal returns, captured writes and exceptions.
+A reachable `return` or `return-rw` without an enclosing Routine is a mismatch,
+including an eager collection callback at unit scope.
+`fail` retains Failure return alternatives, while known `warn`/`CONTROL` and
+exception resume/rethrow paths use bounded handler analysis.
+
+Unknown Slip shapes, custom iteration protocols, unbounded callback batching,
+reflective dispatch and nonlocal returns from deferred callbacks can remain inconclusive. Callback
 analysis is limited to 16 nested applications and generic substitution to depth
 32. Exceptions from deferred producers are retained for Promise observation;
 scheduling, race freedom and termination are not established.
@@ -262,8 +282,9 @@ This is a conservative analyzer, not a proof system for arbitrary Raku:
   and mutable call arguments invalidate constant-content assumptions while
   retaining declared element/key contracts. Fixed array dimensions, structured
   initialization and constant index bounds are checked; dynamic dimensions or
-  indices remain inconclusive. Custom generic parameterizers and complete
-  alias/effect analysis remain inconclusive. Reflective changes are not modeled
+  indices remain inconclusive. Custom generic contracts without compiler-created
+  witnesses and complete heap alias/effect analysis remain inconclusive. Nested
+  tracked container identities invalidate dependent contents after mutation. Reflective changes are not modeled
   as exact contents.
 - Runtime subclass dispatch and mutable captured values can require information
   unavailable during compilation. Strict modes intentionally report uncertainty.

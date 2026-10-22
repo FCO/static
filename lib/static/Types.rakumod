@@ -36,6 +36,9 @@ class Fact is export {
     has Mu $.body;
     has Mu $.owner;
     has %.named;
+    has %.entries;
+    has @.keys;
+    has Bool $.known-entries = False;
     has Mu $.lower;
     has Mu $.upper;
     method label() {
@@ -50,6 +53,7 @@ class Fact is export {
          @!alternatives.map(*.key).sort.join('|'),
          $!has-value ?? $!value.raku !! '', nqp::objectid($!key-type), +$!constrained-elements,
          $!writable, $!identity, @!dependencies.sort.join(';'), @!shape.join(','), $!payload.defined ?? $!payload.key !! '', nqp::objectid($!callable), nqp::objectid($!body), nqp::objectid($!owner), %!named.keys.sort.map({ $_ ~ '=' ~ %!named{$_}.key }).join(';'),
+         +$!known-entries, %!entries.keys.sort.map({ $_ ~ '=' ~ %!entries{$_}.key }).join(';'), @!keys.map(*.key).join(';'),
          $!lower.defined ?? $!lower.Str !! '', $!upper.defined ?? $!upper.Str !! '').join('/')
     }
 }

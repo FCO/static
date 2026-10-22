@@ -17,7 +17,7 @@ my @cases =
     ['captured assignment', 'my Int $x=1; sub change() { $x=-1 }; change(); sub f(Int $n where * > 0) {1}; f($x)', 'unverifiable'],
     ['transitive captured assignment', 'my Int $x=1; sub change() { $x=-1 }; sub outer() {change()}; outer(); sub f(Int $n where * > 0) {1}; f($x)', 'unverifiable'],
     ['rw drops old constant', 'sub change(Int $n is rw) {$n=-1}; my Int $x=1; change($x); sub f(Int $n where * > 0) {1}; f($x)', 'unverifiable'],
-    ['loop widens constants', 'my Int $x=0; while $x < 100 { $x=$x+1 }; sub f(Int $n where * < 20) {1}; f($x)', 'unverifiable'],
+    ['bounded loop final value', 'my Int $x=0; while $x < 100 { $x=$x+1 }; sub f(Int $n where * < 20) {1}; f($x)', 'mismatch'],
     ['opaque predicate with side effect', 'sub f(Int $x where { die ("EXECUTED" ~ " PREDICATE") }) {1}; f(1)', 'unverifiable'],
     ['predicate loop is not executed', 'sub f(Int $x where { loop {} }) {1}; f(1)', 'unverifiable'],
     ['predicate statement execution is refused', 'sub f(Int $x where { die ("EXECUTED" ~ " PREDICATE"); $_ > 0 }) {1}; f(1)', 'unverifiable'],

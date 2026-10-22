@@ -45,6 +45,18 @@ sub interval-operation(Str $op, @args --> Fact) {
         return constant(True) if $yes;
         return constant(False) if $no;
     }
+    if $op eq '*' {
+        for 0,1 -> $i {
+            next unless @args[$i].has-value;
+            my $k = @args[$i].value;
+            my $other = 1-$i;
+            return constant(0) if $k == 0;
+            my $lo = $k >= 0 ?? @lo[$other] !! @hi[$other];
+            my $hi = $k >= 0 ?? @hi[$other] !! @lo[$other];
+            return Fact.new(:type(Int), :definite(1),
+                :lower($lo.defined ?? $lo*$k !! Mu), :upper($hi.defined ?? $hi*$k !! Mu));
+        }
+    }
     if $op eq any('+', '-') {
         my $lower = $op eq '+'
             ?? (@lo[0].defined && @lo[1].defined ?? @lo[0]+@lo[1] !! Mu)
@@ -55,6 +67,48 @@ sub interval-operation(Str $op, @args --> Fact) {
         return Fact.new(:type(Int), :definite(1), :$lower, :$upper) if $lower.defined || $upper.defined;
     }
     unknown('integer interval is inconclusive')
+}
+
+sub primitive-method(Str $name, Fact $receiver, @args --> Fact) is export {
+    return unknown('dynamic method operands') if @args.grep({!.has-value || !primitive(.value)});
+    return unknown('method constant budget exceeded') if @args.grep({same(.type, Str) && .value.chars > 4096});
+    if $receiver.has-value && same($receiver.type, Str) && $receiver.value.chars <= 4096 {
+        my $s = $receiver.value;
+        if !@args {
+            return constant($s.chars) if $name eq 'chars';
+            return constant(1) if $name eq 'elems';
+            return constant($s.lc) if $name eq 'lc';
+            return constant($s.uc) if $name eq 'uc';
+            return constant($s.trim) if $name eq 'trim';
+        }
+        if @args == 1 && same(@args[0].type, Str) {
+            return constant($s.starts-with(@args[0].value)) if $name eq 'starts-with';
+            return constant($s.ends-with(@args[0].value)) if $name eq 'ends-with';
+            return constant($s.contains(@args[0].value)) if $name eq 'contains';
+        }
+        if $name eq 'substr' && 1 <= @args.elems <= 2
+            && @args.grep({!same(.type, Int) || .value < 0}).elems == 0
+            && @args[0].value <= $s.chars {
+            return constant(@args == 1 ?? $s.substr(@args[0].value) !! $s.substr(@args[0].value, @args[1].value));
+        }
+    }
+    if $receiver.has-value && primitive($receiver.value) && $receiver.value ~~ Real && !@args {
+        return constant($receiver.value.abs) if $name eq 'abs';
+        return constant($receiver.value.floor) if $name eq 'floor';
+        return constant($receiver.value.ceiling) if $name eq 'ceiling';
+        return constant($receiver.value.sign) if $name eq 'sign';
+    }
+    if $receiver.finite && !@args {
+        return constant($receiver.items.elems) if $name eq 'elems';
+        if $name eq any(<sum min max>) && $receiver.items.grep({!.has-value || !primitive(.value) || .value !~~ Real}).elems == 0 {
+            my @values = $receiver.items.map(*.value);
+            return constant(@values.sum) if $name eq 'sum';
+            return constant(@values.min) if $name eq 'min';
+            return constant(@values.max) if $name eq 'max';
+        }
+    }
+    return constant($receiver.cardinality) if $name eq 'elems' && !@args && $receiver.cardinality >= 0;
+    unknown('method outside primitive allowlist')
 }
 
 sub operation(Str $op, @args --> Fact) is export {
@@ -177,9 +231,12 @@ sub evaluate($original, Fact $topic, &type-of, &compatible, Str :$name = '', Int
             }
         }
         when RakuAST::ApplyPostfix {
-            if .postfix ~~ RakuAST::Call::Method && .postfix.args.args.elems == 0 {
+            if .postfix ~~ RakuAST::Call::Method && .postfix.dispatch eq '' {
                 my $value = evaluate(.operand, $topic, &type-of, &compatible, :$name, :depth($depth+1), :%bindings);
                 my $method = .postfix.name.canonicalize;
+                my @args = .postfix.args.args.map({evaluate($_, $topic, &type-of, &compatible, :$name, :depth($depth+1), :%bindings)});
+                my $folded = primitive-method($method, $value, @args);
+                return $folded unless $folded.reason;
                 return constant($value.definite == 1) if $method eq 'defined' && $value.definite >= 0 && $value.exact
                     && same($value.type.HOW.find_method($value.type, 'defined'), Mu.^find_method('defined'));
                 return constant($value.value.chars) if $method eq 'chars' && $value.has-value && same($value.type, Str);

@@ -40,3 +40,15 @@ complete dependent typing, and the full Raku dispatch/effect system are not
 proven by these tests. Newly encountered syntax still needs a regression case.
 Raku's own `BEGIN` and other compile-time activity remains normal language
 behavior; the analyzer does not suppress it.
+
+`t/17-collections-loops-and-control` covers callback batching and optional
+arguments, Whatever batches, finite Slip flattening, reduce/classify/categorize,
+rotor/zip/cross, dynamic selection counts, finite and summarized loop inputs,
+loop exits and bounded state, computed method names and callable alternatives,
+local FALLBACK, compiler-created custom generic witnesses, nested mutation
+invalidation, additional primitive predicates, Failure returns, CONTROL/resume,
+and eager nonlocal returns versus lazy callback exceptions, including returns
+without an enclosing Routine and unexecuted callback paths. Each case also
+checks that analysis produces neither CHECK crashes nor uninitialized warnings.
+These bounded rules do not establish arbitrary runtime dispatch, custom
+iteration, reflective heap effects or deferred control flow.

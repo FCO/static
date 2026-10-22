@@ -11,8 +11,8 @@ my @cases =
     ['inherited', 'class B { method value() { 1 } }; class C is B {}; C.new.value()', 'ok'],
     ['qualified method', 'class C { method value() { 1 } }; C.new.C::value()', 'unverifiable'],
     ['broad receiver', 'class C {}; sub f(C $c) { $c.missing() }', 'unverifiable'],
-    ['FALLBACK', 'class C { method FALLBACK($name, |) { die "must" ~ "notrun" } }; C.new.missing()', 'unverifiable'],
-    ['inherited FALLBACK', 'class B { method FALLBACK($name, |) { 1 } }; class C is B {}; C.new.missing()', 'unverifiable'],
+    ['FALLBACK', 'class C { method FALLBACK($name, |) { die "must" ~ "notrun" } }; C.new.missing()', 'ok'],
+    ['inherited FALLBACK', 'class B { method FALLBACK($name, |) { 1 } }; class C is B {}; C.new.missing()', 'ok'],
     ['optional dispatch', 'class C {}; C.new.?missing()', 'unverifiable'],
     ['all dispatch', 'class C {}; C.new.*missing()', 'unverifiable'];
 for @cases -> [$name, $source, $status] {

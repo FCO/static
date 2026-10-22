@@ -10,6 +10,8 @@ has @!routines;
 has %!locals;
 has %!summaries;
 has %!throws;
+has @!parameterizations;
+has Bool $!fatal-pragma = False;
 has %!parameters;
 has %!parameter-rw;
 has %!deferred-writes;
@@ -55,6 +57,8 @@ sub join-env(%target, *@branches) {
 
 method !index($node, Str $location is copy, Mu $package is copy = Mu, Mu $inherited-origin = Mu) {
     return if %!locations{id($node)}:exists;
+    @!parameterizations.push($node) if $node ~~ RakuAST::Type::Parameterized;
+    $!fatal-pragma = True if $node ~~ RakuAST::Statement::Use && $node.raku.contains('fatal');
     %!declarations{id($node)} = $node if $node ~~ RakuAST::VarDeclaration::Simple;
     my $origin = $node.origin;
     $origin = $inherited-origin unless concrete($origin);
@@ -160,6 +164,9 @@ method analyze(RakuAST::CompUnit:D $cu --> List) {
     my $*STATIC-CALLBACK-ARG = False;
     my $*STATIC-CALLBACK-DEPTH = 0;
     my $*STATIC-INVOKE-DEPTH = 0;
+    my @*STATIC-ARGUMENTS;
+    my $*STATIC-HANDLER = False;
+    my $*STATIC-LOOP = False;
     my @*STATIC-YIELDS;
     my $*STATIC-YIELD-KIND = '';
     my Fact $*STATIC-TOPIC = unknown('topic outside given');
@@ -167,6 +174,7 @@ method analyze(RakuAST::CompUnit:D $cu --> List) {
     my %*STATIC-WRITTEN;
     my %*STATIC-PREDICATE-BINDINGS;
     my @*STATIC-EXCEPTIONS;
+    @!parameterizations = (); $!fatal-pragma = False;
     @!routines = (); %!locals = (); %!summaries = (); %!throws = (); %!parameters = ();
     %!parameter-rw = (); %!deferred-writes = ();
     %!binding-writable = (); %!element-aliases = (); %!shapes = (); %!declarations = ();
@@ -405,13 +413,20 @@ method !root($decl) {
     $root
 }
 
+method !mentions(Fact $fact, Str $identity, Int $depth = 0 --> Bool) {
+    return True if $depth > 32;
+    return True if $fact.identity eq $identity || $fact.dependencies.grep(* eq $identity);
+    so (|$fact.items, |$fact.entries.values).first({self!mentions($_, $identity, $depth + 1)})
+}
+
 method !invalidate-dependent(Str $identity, %env) {
     return unless $identity;
     for %env.keys -> $key {
         my $old = %env{$key};
         next unless $old.sequence || same($old.type, Capture);
-        next unless $old.dependencies.grep(* eq $identity);
-        %env{$key} = $old.clone(:finite(False), :items([]), :cardinality(-1), :infinite(False),
+        next unless $old.dependencies.grep(* eq $identity)
+            || (|$old.items, |$old.entries.values).first({self!mentions($_, $identity)});
+        %env{$key} = $old.clone(:finite(False), :items([]), :cardinality(-1), :infinite(False), :known-entries(False), :entries({}), :keys([]),
             :element(unknown('lazy collection source may have changed')));
     }
 }
@@ -430,7 +445,7 @@ method !invalidate($target, %env) {
         for @keys -> $key {
             %*STATIC-WRITTEN{$key} = True;
             my $old = %env{$key};
-            %env{$key} = $old.clone(:finite(False), :items([]),
+            %env{$key} = $old.clone(:finite(False), :items([]), :known-entries(False), :entries({}), :keys([]),
                 :element($old.constrained-elements ?? $old.element !! unknown('collection contents may have changed')));
         }
     }
@@ -676,7 +691,7 @@ method !infer($node, %env, Bool :$immediate = False --> Fact) {
             return self!infer(.body, %env) if $immediate || .is-block-statement;
             # Inspect a closure in a separate context. Its returns must not
             # become exits of the routine constructing that closure.
-            if $!emit && (!$*STATIC-CALLBACK-ARG || .signature.parameters.elems != 1) && !%!checked-blocks{id($_)}++ {
+            if $!emit && !$*STATIC-CALLBACK-ARG && !%!checked-blocks{id($_)}++ {
                 my %closed;
                 my @*STATIC-YIELDS;
                 my $*STATIC-YIELD-KIND = '';
@@ -686,10 +701,26 @@ method !infer($node, %env, Bool :$immediate = False --> Fact) {
             }
             return Fact.new(:type(Block), :definite(1), :exact, :callable(.meta-object), :body($_), :owner($*STATIC-ROUTINE));
         }
+        when RakuAST::Declaration::ResolvedConstant {
+            my Mu $value = ast-type($_);
+            return primitive($value) && concrete($value) ?? constant($value) !! known($value.WHAT, :definite(+concrete($value)));
+        }
+        when RakuAST::Term::TopicCall {
+            my $call = children($_).first(* ~~ RakuAST::Call::Method);
+            return self!postfix($_, $*STATIC-TOPIC, %env, $call) if $call.defined;
+            return unknown('topic call target unavailable');
+        }
+        when RakuAST::Nqp {
+            return known(Nil, :definite(0)) if .op eq 'list' && .args.grep(* ~~ RakuAST::Role::MetaObject);
+            self!report($_, 'unverifiable', 'nqp operation', :reason('low-level user operation has no static rule'));
+            return unknown('low-level operation');
+        }
         when RakuAST::Literal { return primitive(.value) ?? constant(.value) !! known(.value.WHAT, :definite(+concrete(.value)), :exact) }
         when RakuAST::QuotedString {
             return constant(.segments.map(*.value).join) if .segments.grep({ $_ !~~ RakuAST::StrLiteral }).elems == 0;
-            self!infer($_, %env) for .segments.grep({ $_ !~~ RakuAST::StrLiteral });
+            my @parts = .segments.map({$_ ~~ RakuAST::StrLiteral ?? constant(.value) !! self!infer($_, %env)});
+            return @parts[0] if @parts == 1 && same(@parts[0].type, Str);
+            return constant(@parts.map(*.value.Str).join) if @parts.grep({ !.has-value || !primitive(.value) }).elems == 0;
             return known(Str, :definite(1), :exact);
         }
         when RakuAST::Type {
@@ -747,6 +778,10 @@ method !infer($node, %env, Bool :$immediate = False --> Fact) {
                     }
                     else {
                         self!collection-init($_, .initializer.expression, $value, $fact, %env);
+                        if .sigil eq '%' && $value.known-entries {
+                            $fact = $fact.clone(:entries($value.entries), :keys($value.keys), :known-entries,
+                                :element($fact.constrained-elements ?? $fact.element !! $value.element));
+                        }
                         if .sigil eq '@' && $value.finite && !$fact.shape {
                             $fact = $fact.clone(:finite, :items($value.items),
                                 :element($fact.constrained-elements ?? $fact.element !! merge(|$value.items)));
@@ -905,6 +940,7 @@ method !infer($node, %env, Bool :$immediate = False --> Fact) {
         }
         when RakuAST::ApplyPrefix {
             my $value = self!infer(.operand, %env);
+            return $value.clone(:type(Slip)) if .prefix ~~ RakuAST::Prefix && .prefix.operator eq '|';
             my $result = self!operator(.prefix, [$value], $_);
             self!write(.operand, $result, %env, $_)
                 if .prefix ~~ RakuAST::Prefix && .prefix.operator eq any(<++ -->);
@@ -922,7 +958,8 @@ method !infer($node, %env, Bool :$immediate = False --> Fact) {
                 :dependencies((|@pos, |%named.values).map(*.dependencies).flat.unique));
         }
         when RakuAST::WhateverCode::Argument {
-            return .name eq '_whatever_arg_1' ?? $*STATIC-TOPIC !! unknown('multiple Whatever arguments');
+            my $index = .name.split('_').tail.Int - 1;
+            return @*STATIC-ARGUMENTS[$index] // ($index == 0 ?? $*STATIC-TOPIC !! unknown('Whatever argument unavailable'));
         }
         when RakuAST::Term::Whatever { return known(Whatever, :definite(1), :exact) }
         when RakuAST::Call::Name { return self!call($_, %env) }
@@ -931,7 +968,7 @@ method !infer($node, %env, Bool :$immediate = False --> Fact) {
             self!report($_, 'unverifiable', 'indirect call', :reason('call target is not statically resolved'));
             return unknown('indirect call');
         }
-        when RakuAST::Circumfix::Parentheses { return self!infer(.semilist, %env) }
+        when RakuAST::Circumfix::Parentheses { return .semilist.code-statements.elems ?? self!infer(.semilist, %env) !! self!sequence([]) }
         when RakuAST::Circumfix::ArrayComposer {
             my @facts = self!list-items(.semilist).map({ self!infer($_, %env) });
             return Fact.new(:type(Array), :definite(1), :exact, :sequence, :finite, :identity(id($_)), :items(@facts), :element(merge(|@facts)));
@@ -963,6 +1000,10 @@ method !infer($node, %env, Bool :$immediate = False --> Fact) {
         when RakuAST::StatementPrefix::Do | RakuAST::StatementPrefix::Quietly {
             return self!infer(.blorst, %env, :immediate);
         }
+        when RakuAST::Role::ResolveInstantiations | RakuAST::Role::MetaObject {
+            # Compiler-generated role composition metadata, not user code.
+            return known(Nil, :definite(0));
+        }
         when RakuAST::Statement::Use | RakuAST::Statement::Need | RakuAST::Statement::Import
             | RakuAST::Statement::LanguageVersion | RakuAST::Statement::Empty {
             return known(Nil, :definite(0));
@@ -976,11 +1017,89 @@ method !infer($node, %env, Bool :$immediate = False --> Fact) {
     }
 }
 
+method !loop-transfer($node, Int $depth = 0 --> Bool) {
+    return True if $depth > 64;
+    return False if $node ~~ RakuAST::Routine;
+    return True if $node ~~ RakuAST::Call || $node ~~ RakuAST::ApplyPostfix;
+    return True if $node ~~ RakuAST::ApplyInfix && !core-operator($node.infix);
+    return True if $node ~~ RakuAST::ApplyPrefix && !core-operator($node.prefix);
+    so children($node).first({self!loop-transfer($_, $depth + 1)})
+}
+
 method !loop($node, %env --> Fact) {
     my $*STATIC-CONDITIONAL = True;
+    my $*STATIC-LOOP = True;
     self!infer($node.setup, %env) if $node.^can('setup');
-    self!infer($node.source, %env) if $node.^can('source');
+    my $source = $node.^can('source') ?? self!infer($node.source, %env) !! Fact;
+    @*STATIC-EXCEPTIONS.push($source.exception) if $source.defined && $source.exception.defined;
+    my @results;
+    if $node ~~ RakuAST::Statement::For && $source.finite && $source.items.elems <= 256
+        && $node.mode eq 'serial' {
+        my @params = $node.body.signature.parameters.grep(* ~~ RakuAST::Parameter:D);
+        my $width = @params.elems max 1;
+        for $source.items.rotor($width, :partial) -> @batch {
+            my $status = self!match($node.body.meta-object.signature, @batch, {});
+            self!report($node, $status, 'for parameters', :reason('iteration arguments do not satisfy loop signature')) unless $status eq 'ok';
+            for @params.kv -> $i, $parameter {
+                next unless $parameter.target ~~ RakuAST::ParameterTarget::Var;
+                %env{id($parameter.target.declaration)} = @batch[$i] // known($parameter.meta-object.type);
+            }
+            my Fact $*STATIC-TOPIC = @batch[0];
+            my $value = self!infer($node.body.body, %env);
+            if $value.bottom {
+                last if $value.exit-kind eq 'last';
+                next if $value.exit-kind eq 'next';
+                return $value unless $value.exit-kind eq 'redo';
+                self!report($node, 'unverifiable', 'loop redo', :reason('redo iteration requires runtime context'));
+                return unknown('loop redo');
+            }
+            @results.push($value);
+            if $source.identity {
+                my $current = %env.values.first({.identity eq $source.identity});
+                if $current.defined && (!$current.finite || $current.items.map(*.key).join('|') ne $source.items.map(*.key).join('|')) {
+                    self!report($node, 'unverifiable', 'for source mutation', :reason('iteration source changes while being consumed'));
+                    self!invalidate($node.source, %env);
+                    return self!loop($node, %env);
+                }
+            }
+        }
+        if $node.body.meta-object.signature.params.grep(*.rw) {self!invalidate($node.source, %env)}
+        return self!sequence(@results);
+    }
+    if $node ~~ RakuAST::Statement::For && $source.sequence && $source.element.defined {
+        my $width = $node.body.meta-object.signature.params.grep({!.named && !.invocant}).elems max 1;
+        my $status = self!match($node.body.meta-object.signature, [$source.element xx $width], {});
+        self!report($node, $status, 'for parameters', :reason('iteration element contract does not satisfy loop signature')) unless $status eq 'ok';
+        for $node.body.signature.parameters.grep(* ~~ RakuAST::Parameter:D) -> $parameter {
+            %env{id($parameter.target.declaration)} = $source.element
+                if $parameter.target ~~ RakuAST::ParameterTarget::Var;
+        }
+    }
     my %initial = clone-env(%env);
+    unless $node ~~ RakuAST::Statement::For {
+        for ^256 -> $iteration {
+            my $condition = $iteration == 0 && $node.^name.contains('Repeat') ?? constant(True)
+                !! $node.^can('condition') && $node.condition.defined
+                ?? do { self!infer($node.condition, %env); self!condition($node.condition, %env) }
+                !! constant(True);
+            last unless $condition.has-value;
+            my $take = so $condition.value;
+            $take = !$take if $node.^name.ends-with('Until')
+                && !($iteration == 0 && $node.^name.contains('Repeat'));
+            return self!sequence(@results, :type(Seq)) unless $take;
+            my $value = self!infer($node.body, %env, :immediate);
+            if $value.bottom {
+                return self!sequence(@results, :type(Seq)) if $value.exit-kind eq 'last';
+                return $value unless $value.exit-kind eq any(<next redo>);
+                last if $value.exit-kind eq 'redo';
+            }
+            else {@results.push($value)}
+            return bottom(:exit-kind<abrupt>) if !$node.^name.contains('Repeat') && !self!loop-transfer($node.body)
+                && (!$node.^can('condition') || !$node.condition.defined || $node.condition ~~ RakuAST::Literal | RakuAST::Term::Enum);
+            self!infer($node.increment, %env) if $node.^can('increment') && $node.increment.defined;
+        }
+    }
+    my Fact $*STATIC-TOPIC = $source.defined && $source.element.defined ?? $source.element !! unknown('loop topic');
     for ^16 {
         my $before = %env.keys.sort.map({ $_ ~ '=' ~ %env{$_}.key }).join('|');
         my %body = clone-env(%env);
@@ -988,9 +1107,6 @@ method !loop($node, %env --> Fact) {
         self!infer($node.body, %body, :immediate);
         self!infer($node.increment, %body) if $node.^can('increment');
         join-env(%env, %initial, %body);
-        # Widen changing constants to their nominal types. Retaining one more
-        # literal per iteration would pretend that a bounded analysis had
-        # enumerated all values of an unbounded loop.
         for %env.keys -> $key {
             next unless %initial{$key}:exists;
             next if %env{$key}.key eq %initial{$key}.key;
@@ -999,12 +1115,12 @@ method !loop($node, %env --> Fact) {
         }
         last if $before eq %env.keys.sort.map({ $_ ~ '=' ~ %env{$_}.key }).join('|');
     }
-    # Loop results depend on iteration count and gather context.
     unknown('loop result depends on runtime iteration')
 }
 
 method !collection-init($decl, $expression, Fact $value, Fact $contract, %env) {
     return if same($value.type, Nil);
+    @*STATIC-EXCEPTIONS.push($value.exception) if $decl.sigil eq '@' && $value.exception.defined;
     my Mu $expected = $contract.element.type;
     if $decl.sigil eq '@' {
         if $contract.shape { self!shaped-init($decl, $value, $contract.shape, $expected); return }
@@ -1018,6 +1134,11 @@ method !collection-init($decl, $expression, Fact $value, Fact $contract, %env) {
         else { self!check($decl, $value, $expected, 'array element initialization') }
     }
     else {
+        if $value.known-entries {
+            self!check($decl, $_, $expected, 'hash value initialization') for $value.entries.values;
+            self!check($decl, $_, $contract.key-type, 'hash key initialization') for $value.keys;
+            return;
+        }
         for self!list-items($expression) -> $item {
             if $item ~~ RakuAST::FatArrow || ($item ~~ RakuAST::ColonPair && $item.^can('value')) {
                 self!check($item, self!infer($item.value, %env), $expected, 'hash value initialization');
@@ -1045,6 +1166,18 @@ method !operator($operator, @facts, $site --> Fact) {
     if $core {
         my $folded = operation($name, @facts);
         return $folded if $folded.has-value || $folded.lower.defined || $folded.upper.defined;
+        if $name eq any('..', '^..', '..^', '^..^') && @facts == 2
+            && @facts.grep({ !.has-value || !same(.type, Int) }).elems == 0 {
+            my $lo = @facts[0].value + ($name.starts-with('^') ?? 1 !! 0);
+            my $hi = @facts[1].value - ($name.ends-with('^') ?? 1 !! 0);
+            my $length = (1 + $hi - $lo) max 0;
+            return self!sequence(($lo .. $hi).map({constant($_)}), :type(Range)) if $length <= 256;
+            return Fact.new(:type(Range), :definite(1), :exact, :sequence, :cardinality($length), :element(known(Int, :definite(1))));
+        }
+        if $name eq any('++', '--') && @facts == 1 {
+            my $value = operation($name eq '++' ?? '+' !! '-', [@facts[0], constant(1)]);
+            return $value unless $value.reason;
+        }
         return known(Str, :definite(1)) if $name eq '~';
         return known(Bool, :definite(1)) if $name eq any('==', '!=', '<', '>', '<=', '>=', 'eq', 'ne', 'lt', 'gt', 'le', 'ge', '===', '!', '?', 'so', 'not', '~~', '!~~');
         return merge(|@facts) if $name eq any('&&', '||', '//', 'and', 'or', 'orelse');
@@ -1118,13 +1251,16 @@ method !call($node, %env --> Fact) {
     }
     my $*STATIC-CALLBACK-ARG = $node.is-resolved
         && $node.resolution ~~ RakuAST::Declaration::External::Setting
-        && $name eq any(<map grep first>);
+        && $name eq any(<map grep first reduce classify categorize>);
     my (@pos, %named, $uncertain) := self!arguments($node.args, %env);
     if $node.is-resolved && (%env{id(self!root($node.resolution))}:exists) {
         my $target = %env{id(self!root($node.resolution))};
-        return self!invoke($target, @pos, %named, $uncertain, $node, %env) if $target.callable.defined;
+        return self!invoke($target, @pos, %named, $uncertain, $node, %env) if $target.callable.defined || $target.alternatives && $target.alternatives.grep({!.callable.defined}).elems == 0;
     }
     my $core = $node.is-resolved && $node.resolution ~~ RakuAST::Declaration::External::Setting;
+    if $core && !$uncertain && !%named && $name eq any(<zip cross>) {
+        return self!product($name, @pos, $node);
+    }
     if $core && !$uncertain && !%named && $name eq any(<pop shift>) && @pos == 1 {
         my $collection = @pos[0];
         if $collection.exact && (same($collection.type, Array)
@@ -1133,7 +1269,7 @@ method !call($node, %env --> Fact) {
             return self!collection-op($name, $collection, [], $node, %env);
         }
     }
-    if $core && !$uncertain && !%named && $name eq any(<map grep first pick roll>) && @pos {
+    if $core && !$uncertain && !%named && $name eq any(<map grep first reduce classify categorize pick roll rotor>) && @pos {
         my @items;
         my $finite = True;
         my @elements;
@@ -1153,6 +1289,10 @@ method !call($node, %env --> Fact) {
         my $result = self!collection-op($name, $collection, [@pos[0]], $node, %env);
         return $result if $result.defined;
     }
+    if $core && $name eq 'slip' && !$uncertain && !%named {
+        my @items = @pos.map({ .sequence && .finite ?? .items.List !! ($_,) }).flat;
+        return self!sequence(@items, :type(Slip));
+    }
     if $core && $name eq any(<take take-rw emit>) {
         my $value = @pos == 1 ?? @pos[0] !! unknown('yield argument count');
         if ($name eq 'emit' && $*STATIC-YIELD-KIND eq 'supply')
@@ -1169,11 +1309,29 @@ method !call($node, %env --> Fact) {
         return @pos[0].payload;
     }
     if $core && $name eq any(<return return-rw>) {
+        unless concrete($*STATIC-ROUTINE) {
+            self!report($node, 'mismatch', $name, :reason('Attempt to return outside of any Routine'));
+            return bottom(:exit-kind<throw>, :exception(known(X::ControlFlow::Return, :definite(1), :exact)));
+        }
         my $value = @pos == 0 ?? known(Nil, :definite(0)) !! @pos == 1 ?? @pos[0]
             !! Fact.new(:type(List), :definite(1), :sequence, :finite, :items(@pos));
         @*STATIC-RETURNS.push($value);
         return bottom(:exit-kind<return>);
     }
+    if $core && $name eq 'warn' {
+        @*STATIC-EXCEPTIONS.push(known(CX::Warn, :definite(1), :exact));
+        return known(Nil, :definite(0));
+    }
+    if $core && $name eq 'fail' {
+        if $!fatal-pragma {
+            self!report($node, 'unverifiable', 'fail', :reason('fatal pragma changes failure propagation'));
+            return unknown('fatal fail semantics');
+        }
+        my $value = Fact.new(:type(Failure), :definite(1), :exact, :exception(known(X::AdHoc, :definite(1), :exact)));
+        @*STATIC-RETURNS.push($value);
+        return bottom(:exit-kind<return>);
+    }
+    return bottom(:exit-kind($name)) if $core && $*STATIC-LOOP && $name eq any(<last next redo>);
     if $core && $name eq 'die' {
         my $exception = @pos == 1 && nqp::istype(@pos[0].type, Exception) ?? @pos[0]
             !! @pos.grep({ !.has-value || !primitive(.value) }) ?? known(Exception, :definite(1))
@@ -1328,6 +1486,14 @@ method !dispatch(Mu $routine, @pos, %named, $site, Str $context, Bool :$uncertai
                 && $ast.signature.returns ~~ RakuAST::Type::Parameterized
                 ?? self!resolve-contract($ast.signature.returns, %*STATIC-TYPES)
                 !! self!specialize(self!has-return-contract($ast) ?? known($signature.returns) !! %!summaries{id($ast)}, %*STATIC-TYPES);
+            if self!has-return-contract($ast) && !%!summaries{id($ast)}.bottom {
+                my $summary = %!summaries{id($ast)};
+                my @alts = $summary.alternatives ?? $summary.alternatives.List !! ($summary,);
+                my @special = @alts.grep({same(.type, Failure) || same(.type, Nil)});
+                if @special {
+                    $return = merge(|@special, |(@alts.elems > @special.elems ?? ($return,) !! ()));
+                }
+            }
             @possible.push($return);
         }
         else {
@@ -1389,13 +1555,21 @@ method !resolve-contract($ast, %types, Int $depth = 0 --> Fact) {
     return unknown('generic contract depth exceeded') if $depth > 32 || !$ast.defined;
     if $ast ~~ RakuAST::Type::Parameterized {
         my Mu $base = ast-type($ast.base-type);
-        return unknown('custom generic parameterizer') unless (Array, List, Positional, Hash, Associative)
-            .grep({ same($_, $base) });
         my @args;
         for $ast.args.args -> $arg {
             my $resolved = self!resolve-contract($arg, %types, $depth + 1);
             return $resolved if $resolved.reason;
             @args.push($resolved.type);
+        }
+        unless (Array, List, Positional, Hash, Associative).grep({same($_, $base)}) {
+            for @!parameterizations -> $candidate {
+                next unless same(ast-type($candidate.base-type), $base) && $candidate.args.args.elems == @args.elems;
+                my Mu $type = ast-type($candidate);
+                next if $type.^archetypes.generic;
+                my @parameters = $candidate.args.args.map({ast-type($_)});
+                return known($type) if (^@args.elems).grep({!same(@parameters[$_], @args[$_])}).elems == 0;
+            }
+            return unknown('custom parameterization has no compiler-created witness');
         }
         my Mu $type = $base.HOW.parameterize($base, |@args);
         return known($type);
@@ -1430,7 +1604,7 @@ method !has-nonlocal-return($node, Int $depth = 0 --> Bool) {
 }
 
 method !invoke-block(Fact $target, @pos, %named, Bool $uncertain, $site, %env --> Fact) {
-    my $*STATIC-INVOKE-DEPTH = $*STATIC-INVOKE-DEPTH + 1;
+    my $*STATIC-INVOKE-DEPTH = (CALLERS::<$*STATIC-INVOKE-DEPTH> // 0) + 1;
     if $*STATIC-INVOKE-DEPTH > 16 || $uncertain
         || self!has-nonlocal-return($target.body.body) && !same($target.owner, $*STATIC-ROUTINE) {
         self!report($site, 'unverifiable', 'indirect call', :reason('closure target, nonlocal return or recursion requires runtime context'));
@@ -1479,6 +1653,18 @@ method !invoke-block(Fact $target, @pos, %named, Bool $uncertain, $site, %env --
 }
 
 method !invoke(Fact $target, @pos, %named, Bool $uncertain, $site, %env --> Fact) {
+    if $target.alternatives && $target.alternatives.grep({!.callable.defined}).elems == 0 {
+        my @values;
+        my @states;
+        for $target.alternatives -> $alternative {
+            my %branch = clone-env(%env);
+            my $value = self!invoke($alternative, @pos, %named, $uncertain, $site, %branch);
+            @values.push($value);
+            @states.push(%branch) unless $value.bottom;
+        }
+        join-env(%env, |@states) if @states;
+        return merge(|@values);
+    }
     unless $target.callable.defined {
         self!report($site, 'unverifiable', 'indirect call', :reason('call target is not statically resolved'));
         return unknown('indirect call target unavailable');
@@ -1493,12 +1679,32 @@ method !invoke(Fact $target, @pos, %named, Bool $uncertain, $site, %env --> Fact
     $value
 }
 
-method !callback(Fact $callback, Fact $item, $site, %env --> Fact) {
-    if $callback.body ~~ RakuAST::Block && self!has-nonlocal-return($callback.body.body) {
+method !callback-effects(%env, %branch, %written, Bool $eager) {
+    for %env.keys -> $key {
+        if $eager { %env{$key} = %branch{$key} // %env{$key} }
+        elsif %written{$key} {
+            self!invalidate-dependent(%env{$key}.identity, %env);
+            self!invalidate-dependent($key, %env);
+            %!deferred-writes{$key} = True;
+            %env{$key} = unknown('value may be modified by collection callback');
+        }
+    }
+}
+
+method !callback(Fact $callback, Fact $item, $site, %env, :@arguments = [$item], Bool :$eager = False --> Fact) {
+    my @caller-returns := CALLERS::<@*STATIC-RETURNS>;
+    my @caller-exceptions := CALLERS::<@*STATIC-EXCEPTIONS>;
+    my %caller-writes := CALLERS::<%*STATIC-WRITTEN>;
+    my @*STATIC-RETURNS;
+    my @*STATIC-EXCEPTIONS;
+    my %*STATIC-WRITTEN;
+    my @*STATIC-ARGUMENTS = @arguments;
+    my $nonlocal = $callback.body ~~ RakuAST::Block && self!has-nonlocal-return($callback.body.body);
+    if $nonlocal && (!$eager || !same($callback.owner, CALLERS::<$*STATIC-ROUTINE>)) {
         self!report($site, 'unverifiable', 'collection callback', :reason('callback has a nonlocal return'));
         return unknown('callback has a nonlocal return');
     }
-    my $*STATIC-CALLBACK-DEPTH = $*STATIC-CALLBACK-DEPTH + 1;
+    my $*STATIC-CALLBACK-DEPTH = (CALLERS::<$*STATIC-CALLBACK-DEPTH> // 0) + 1;
     if $*STATIC-CALLBACK-DEPTH > 16 {
         self!report($site, 'unverifiable', 'collection callback', :reason('callback analysis depth exceeded'));
         return unknown('callback analysis depth exceeded');
@@ -1507,10 +1713,15 @@ method !callback(Fact $callback, Fact $item, $site, %env --> Fact) {
         my Fact $*STATIC-TOPIC = $item;
         my %branch = clone-env(%env);
         for %branch.keys -> $key {
+            next if $eager;
             %branch{$key} = (%!declarations{$key}:exists) ?? self!declared(%!declarations{$key})
                 !! unknown('mutable callback capture');
         }
-        return self!infer($callback.body, %branch);
+        my $value = self!infer($callback.body, %branch);
+        self!callback-effects(%env, %branch, %*STATIC-WRITTEN, $eager);
+        %caller-writes{$_} = True for %*STATIC-WRITTEN.keys;
+        @caller-exceptions.append(|@*STATIC-EXCEPTIONS) if $eager;
+        return @*STATIC-EXCEPTIONS ?? $value.clone(:exception(merge(|@*STATIC-EXCEPTIONS))) !! $value;
     }
     if !$callback.callable.defined && $callback.definite == 0 && nominal-matcher($callback.type) {
         my $status = self!relation($item, $callback.type);
@@ -1522,38 +1733,56 @@ method !callback(Fact $callback, Fact $item, $site, %env --> Fact) {
     }
     my $*STATIC-CALLBACK-ARG = False;
     my $signature = $callback.callable.signature;
-    my $status = self!match($signature, [$item], {});
+    my $status = self!match($signature, @arguments, {});
     self!report($site, $status, 'collection callback', :expected($signature.raku), :actual($item.label)) unless $status eq 'ok';
     return unknown('callback arguments incompatible') if $status eq 'mismatch';
     unless $callback.body.defined {
-        return self!dispatch($callback.callable, [$item], {}, $site, 'collection callback');
+        my $value = self!dispatch($callback.callable, @arguments, {}, $site, 'collection callback');
+        for @arguments.grep(*.identity) -> $argument {
+            self!invalidate-dependent($argument.identity, %env);
+            for %env.keys -> $key {
+                next unless %env{$key}.identity eq $argument.identity;
+                %env{$key} = %env{$key}.clone(:finite(False), :items([]), :known-entries(False), :entries({}),
+                    :element(%env{$key}.constrained-elements ?? %env{$key}.element !! unknown('external callback mutation')));
+            }
+        }
+        @caller-exceptions.append(|@*STATIC-EXCEPTIONS) if $eager;
+        return @*STATIC-EXCEPTIONS ?? $value.clone(:exception(merge(|@*STATIC-EXCEPTIONS))) !! $value;
     }
     my %branch = clone-env(%env);
     # Collection pipelines may execute later. Mutable captures cannot retain
     # their current constants, unlike callback parameters bound to each item.
     for %branch.keys -> $key {
+        next if $eager;
         next if (%!binding-writable{$key}:exists) && %!binding-writable{$key} == 0;
         %branch{$key} = (%!declarations{$key}:exists) ?? self!declared(%!declarations{$key}).clone(:identity(%branch{$key}.identity))
             !! unknown('mutable callback capture');
     }
-    my @params = $callback.body.signature.parameters;
-    if @params && @params[0].target ~~ RakuAST::ParameterTarget::Var {
-        %branch{id(@params[0].target.declaration)} = $item;
+    my @params = $callback.body.signature.parameters.grep(* ~~ RakuAST::Parameter:D);
+    for @params.kv -> $i, $parameter {
+        next unless $parameter.target ~~ RakuAST::ParameterTarget::Var;
+        my $param = $parameter.meta-object;
+        my $value = $param.slurpy
+            ?? self!sequence(@arguments[$i ..^ @arguments.elems])
+            !! @arguments[$i] // ($parameter.default.defined
+                ?? self!infer($parameter.default, %branch) !! known($param.type));
+        %branch{id($parameter.target.declaration)} = $value;
     }
     my Fact $*STATIC-TOPIC = $item;
-    my @*STATIC-RETURNS;
     my @*STATIC-YIELDS;
     my $*STATIC-YIELD-KIND = '';
-    my Mu $*STATIC-ROUTINE = $callback.body;
-    my %*STATIC-WRITTEN;
+    my Mu $*STATIC-ROUTINE = $eager && $callback.body ~~ RakuAST::Block
+        ?? CALLERS::<$*STATIC-ROUTINE> !! $callback.body;
     my $result = self!infer($callback.body.body, %branch, :immediate);
-    for %env.keys -> $key {
-        if %*STATIC-WRITTEN{$key} {
-            %!deferred-writes{$key} = True;
-            %env{$key} = unknown('value may be modified by collection callback');
-        }
+    self!callback-effects(%env, %branch, %*STATIC-WRITTEN, $eager);
+    %caller-writes{$_} = True for %*STATIC-WRITTEN.keys;
+    @caller-exceptions.append(|@*STATIC-EXCEPTIONS) if $eager;
+    if $nonlocal {
+        @caller-returns.append(|@*STATIC-RETURNS);
+        return $result;
     }
     my $value = merge($result, |@*STATIC-RETURNS);
+    $value = $value.clone(:exception(merge(|@*STATIC-EXCEPTIONS))) if @*STATIC-EXCEPTIONS;
     if $callback.body ~~ RakuAST::Routine && self!has-return-contract($callback.body) {
         my Mu $expected = $signature.returns;
         for ($value.alternatives ?? $value.alternatives.List !! ($value,)) -> $alt {
@@ -1564,7 +1793,107 @@ method !callback(Fact $callback, Fact $item, $site, %env --> Fact) {
     $value
 }
 
-method !collection-op(Str $name, Fact $collection, @pos, $site, %env --> Fact) {
+method !sequence(@items, Mu :$type = List --> Fact) {
+    Fact.new(:$type, :definite(1), :exact, :sequence, :finite,
+        :cardinality(@items.elems), :items(@items), :element(merge(|@items)))
+}
+
+method !product(Str $name, @inputs, $site --> Fact) {
+    return unknown('product inputs unavailable') unless @inputs;
+    my @dependencies = @inputs.map({|.dependencies, |(.identity ?? (.identity,) !! ())}).flat.unique;
+    unless @inputs.grep({ !.sequence || !.finite }).elems == 0 {
+        my @elements = @inputs.map({.sequence ?? .element !! unknown('product input is not a sequence')});
+        my @lengths = @inputs.map({.finite ?? .items.elems !! .cardinality});
+        return self!sequence([], :type(Seq)) if @lengths.grep(* == 0);
+        my $cardinality = @lengths.grep(* < 0) ?? -1 !! ($name eq 'zip' ?? @lengths.min !! [*] @lengths);
+        return Fact.new(:type(Seq), :definite(1), :exact, :sequence, :$cardinality,
+            :dependencies(@dependencies), :element(self!sequence(@elements)));
+    }
+    my @rows;
+    return self!sequence([], :type(Seq)) if @inputs.first({!.items.elems});
+    if $name eq 'zip' {
+        my $length = @inputs.map(*.items.elems).min;
+        return Fact.new(:type(Seq), :definite(1), :exact, :sequence, :cardinality($length),
+            :dependencies(@dependencies), :element(self!sequence(@inputs.map(*.element)))) if $length > 256;
+        @rows = (^$length).map(-> $i {self!sequence(@inputs.map({.items[$i]}))});
+    }
+    else {
+        @rows = self!sequence([]),;
+        for @inputs -> $input {
+            if @rows.elems * $input.items.elems > 256 {
+                return Fact.new(:type(Seq), :definite(1), :exact, :sequence,
+                    :cardinality([*] @inputs.map(*.items.elems)), :dependencies(@dependencies),
+                    :element(self!sequence(@inputs.map(*.element))));
+            }
+            my @next;
+            for @rows -> $row {
+                @next.push(self!sequence([|$row.items, $_])) for $input.items;
+            }
+            @rows = @next;
+        }
+    }
+    self!sequence(@rows, :type(Seq)).clone(:dependencies(@dependencies))
+}
+
+method !collection-op(Str $name, Fact $collection, @pos, $site, %env, :%named = {} --> Fact) {
+    @*STATIC-EXCEPTIONS.push($collection.exception) if $collection.exception.defined && $name eq any(<reduce classify categorize first>);
+    if $name eq 'rotor' && @pos == 1 && @pos[0].has-value && same(@pos[0].type, Int) && @pos[0].value > 0 {
+        my $size = @pos[0].value;
+        my $partial = %named<partial>:exists ?? %named<partial> !! constant(False);
+        return Fact unless $partial.has-value;
+        if $collection.finite && $collection.items.elems <= 256 {
+            my @groups = $collection.items.rotor($size, :partial(so $partial.value)).map({self!sequence($_)});
+            return self!sequence(@groups, :type(Seq)).clone(
+                :dependencies([|$collection.dependencies, |($collection.identity ?? ($collection.identity,) !! ())]),
+                :exception($collection.exception));
+        }
+        return Fact.new(:type(Seq), :definite(1), :exact, :sequence,
+            :element(Fact.new(:type(List), :definite(1), :exact, :sequence, :element($collection.element))));
+    }
+    if $name eq 'reduce' && @pos == 1 {
+        my $callback = @pos[0];
+        unless $collection.finite && $collection.items.elems <= 256 {
+            my $acc = $collection.element // unknown('reduction input unavailable');
+            for ^8 {
+                my $next = self!callback($callback, $acc, $site, %env, :arguments([$acc, $collection.element]), :eager);
+                my $joined = merge($acc, $next);
+                last if $joined.key eq $acc.key;
+                $acc = $joined.reason ?? $joined !! known($joined.type, :definite($joined.definite));
+            }
+            return $acc;
+        }
+        return self!callback($callback, known(Nil), $site, %env, :arguments([]), :eager) unless $collection.items;
+        my $acc = $collection.items[0];
+        for $collection.items.skip(1) -> $item {
+            $acc = self!callback($callback, $acc, $site, %env, :arguments([$acc, $item]), :eager);
+            return $acc if $acc.bottom;
+        }
+        return $acc;
+    }
+    if $name eq any(<classify categorize>) && @pos == 1 {
+        my @items = $collection.finite && $collection.items.elems <= 256 ?? $collection.items.List !! ($collection.element,);
+        my %groups;
+        my @keys;
+        my $certain = $collection.finite && $collection.items.elems <= 256;
+        for @items -> $item {
+            my $key = self!callback(@pos[0], $item, $site, %env, :eager);
+            return $key if $key.bottom;
+            my @key-facts = $name eq 'categorize' && $key.finite ?? $key.items.List !! ($key,);
+            for @key-facts -> $entry {
+                if $entry.has-value && primitive($entry.value) {
+                    my $encoded = $entry.value.raku;
+                    %groups{$encoded}.push($item);
+                    @keys.push($entry);
+                }
+                else {$certain = False}
+            }
+        }
+        my %entries = %groups.map({.key => self!sequence(.value, :type(Array))});
+        my $element = $certain ?? merge(|%entries.values)
+            !! Fact.new(:type(Array), :definite(1), :exact, :sequence, :element($collection.element));
+        return Fact.new(:type(Hash), :definite(1), :exact, :element($element), :entries(%entries),
+            :keys(@keys.unique(:as(*.key))), :known-entries($certain));
+    }
     if $name eq any(<pick roll>) {
         return $collection.finite
             ?? ($collection.items ?? merge(|$collection.items) !! known(Nil, :definite(0)))
@@ -1573,7 +1902,12 @@ method !collection-op(Str $name, Fact $collection, @pos, $site, %env --> Fact) {
         return Fact unless @pos == 1;
         my $count = @pos[0];
         my $star = same($count.type, Whatever);
-        return Fact unless $star || $count.has-value && same($count.type, Int) && $count.value >= 0;
+        unless $star || $count.has-value && same($count.type, Int) && $count.value >= 0 {
+            return Fact unless same($count.type, Int) && $count.definite == 1;
+            return Fact.new(:type(Positional), :definite(1), :sequence,
+                :element($collection.element // unknown('selection element unavailable')),
+                :dependencies([|$collection.dependencies, |($collection.identity ?? ($collection.identity,) !! ())]));
+        }
         my $zero = $count.has-value && $count.value == 0;
         return Fact.new(:type($name eq 'pick' && $collection.finite && !$collection.items ?? List !! Seq),
             :definite(1), :exact, :sequence, :finite, :cardinality(0), :items([]), :element(bottom))
@@ -1614,21 +1948,50 @@ method !collection-op(Str $name, Fact $collection, @pos, $site, %env --> Fact) {
         elsif $site ~~ RakuAST::Call::Name { self!invalidate($site.args.args[0], %env) }
         return $value;
     }
-    if $name eq any(<map grep first>) && @pos == 1 {
+    if $name eq any(<map grep first reduce classify categorize>) && @pos == 1 {
         my $callback = @pos[0];
-        # map consumes batches for multi-argument callbacks. Leave those to
-        # ordinary dispatch until the input grouping is statically modeled.
-        return Fact if $name eq 'map' && $callback.callable.defined
-            && $callback.callable.signature.params.grep({ !.named && !.invocant }).elems != 1;
+        if $name eq 'map' && !$collection.finite && @pos[0].callable.defined
+            && @pos[0].callable.signature.params.grep(*.slurpy) {
+            self!report($site, 'unverifiable', 'map batching', :reason('slurpy batch length is unknown'));
+            return Fact.new(:type(Seq), :definite(1), :exact, :sequence, :element(unknown('slurpy map batch')));
+        }
+        my $width = 1;
+        if $name eq 'map' && $callback.callable.defined {
+            my @params = $callback.callable.signature.params.grep({ !.named && !.invocant });
+            $width = @params.grep(*.slurpy) ?? ($collection.finite ?? $collection.items.elems max 1 !! 1)
+                !! @params.elems max 1;
+        }
+        elsif $name eq 'map' && $callback.body.defined {
+            my &scan;
+            &scan = sub ($node) {
+                $width = $width max $node.name.split('_').tail.Int if $node ~~ RakuAST::WhateverCode::Argument;
+                scan($_) for children($node);
+            };
+            scan($callback.body);
+        }
         my @items = $collection.finite && $collection.items.elems <= 256
             ?? $collection.items.List !! ($collection.element,);
         my @results;
+        my @exceptions = $collection.exception.defined ?? ($collection.exception,) !! ();
         my $certain = $collection.finite && $collection.items.elems <= 256;
-        for @items -> $item {
-            my $result = self!callback($callback, $item, $site, %env);
+        if !$certain && $width > 1 {
+            @items = $collection.element xx $width;
+            self!report($site, 'unverifiable', 'map batching', :reason('final batch length is unknown'));
+        }
+        for @items.rotor($width, :partial) -> @batch {
+            my $item = @batch[0];
+            my $result = self!callback($callback, $item, $site, %env, :arguments(@batch), :eager($name eq 'first'));
+            return $result if $result.bottom && $name eq 'first';
+            @exceptions.push($result.exception) if $result.exception.defined;
             if $name eq 'map' {
-                @results.push(same($result.type, Slip) || same($result.type, Mu) || same($result.type, Any)
-                    ?? unknown('map callback may flatten a Slip') !! $result);
+                if same($result.type, Slip) {
+                    if $result.finite { @results.append(|$result.items) }
+                    else { @results.push($result.element // unknown('Slip elements unavailable')); $certain = False }
+                }
+                else {
+                    @results.push(same($result.type, Mu) || same($result.type, Any)
+                        ?? unknown('map callback may flatten a Slip') !! $result);
+                }
                 next;
             }
             if $result.has-value && primitive($result.value) {
@@ -1646,12 +2009,36 @@ method !collection-op(Str $name, Fact $collection, @pos, $site, %env --> Fact) {
         $certain = False if $name eq 'map' && @results.grep({ !.exact || .sequence });
         return Fact.new(:type(Seq), :definite(1), :exact, :sequence,
             :finite($certain), :items($certain ?? @results !! []), :element(merge(|@results)),
+            :exception(@exceptions ?? merge(|@exceptions) !! Fact),
             :dependencies([|$collection.dependencies, |($collection.identity ?? ($collection.identity,) !! ())]));
     }
     Fact
 }
 
 method !postfix($node, Fact $invocant, %env, $postfix = $node.postfix --> Fact) {
+    if $postfix ~~ RakuAST::Call::QuotedMethod {
+        my $name = self!infer($postfix.name, %env);
+        if $name.has-value && same($name.type, Str) {
+            my $resolved = RakuAST::Call::Method.new(:name(RakuAST::Name.from-identifier($name.value)), :args($postfix.args));
+            return self!postfix($node, $invocant, %env, $resolved);
+        }
+        if $name.alternatives && $name.alternatives.elems <= 16
+            && $name.alternatives.grep({!.has-value || !same(.type, Str)}).elems == 0 {
+            my @values;
+            my @states;
+            for $name.alternatives -> $alternative {
+                my %branch = clone-env(%env);
+                my $resolved = RakuAST::Call::Method.new(:name(RakuAST::Name.from-identifier($alternative.value)), :args($postfix.args));
+                my $value = self!postfix($node, $invocant, %branch, $resolved);
+                @values.push($value);
+                @states.push(%branch) unless $value.bottom;
+            }
+            join-env(%env, |@states) if @states;
+            return merge(|@values);
+        }
+        self!report($node, 'unverifiable', 'computed method', :reason('method name is not statically known'));
+        return unknown('computed method name unavailable');
+    }
     if $postfix ~~ RakuAST::Call::Term {
         my (@pos, %named, $uncertain) := self!arguments($postfix.args, %env);
         return self!invoke($invocant, @pos, %named, $uncertain, $node, %env);
@@ -1687,6 +2074,7 @@ method !postfix($node, Fact $invocant, %env, $postfix = $node.postfix --> Fact) 
     if $postfix ~~ RakuAST::Call::Method || $postfix ~~ RakuAST::Call::PrivateMethod {
         my $name = $postfix.name.canonicalize;
         if $invocant.sequence && $name eq 'head' && !$postfix.args.args {
+            @*STATIC-EXCEPTIONS.push($invocant.exception) if $invocant.exception.defined;
             return $invocant.finite
                 ?? ($invocant.items ?? $invocant.items[0] !! known(Nil, :definite(0)))
                 !! (concrete($invocant.element) ?? merge($invocant.element, known(Nil, :definite(0))) !! unknown('sequence element unavailable'));
@@ -1695,9 +2083,14 @@ method !postfix($node, Fact $invocant, %env, $postfix = $node.postfix --> Fact) 
             return constant($invocant.value.chars) if $name eq 'chars' && same($invocant.type, Str);
             return constant($invocant.value.Str) if $name eq 'Str';
         }
-        my $*STATIC-CALLBACK-ARG = $name eq any(<map grep first>) && $invocant.exact
+        my $*STATIC-CALLBACK-ARG = $name eq any(<map grep first reduce classify categorize>) && $invocant.exact
             && (List, Array, Seq).grep({ same($_, $invocant.type) });
         my (@pos, %named, $uncertain) := self!arguments($postfix.args, %env);
+        if !%named && $postfix ~~ RakuAST::Call::Method && $postfix.dispatch eq ''
+            && ($invocant.has-value && primitive($invocant.value) || $invocant.exact && $invocant.sequence) {
+            my $folded = primitive-method($name, $invocant, @pos);
+            return $folded unless $folded.reason;
+        }
         my Mu $type = nominal($invocant.type);
         if $invocant.shape && $name eq any(<push append unshift prepend pop shift splice>) {
             self!report($node, 'mismatch', 'array shape mutation',
@@ -1725,13 +2118,23 @@ method !postfix($node, Fact $invocant, %env, $postfix = $node.postfix --> Fact) 
         my Mu $method = $postfix ~~ RakuAST::Call::PrivateMethod
             ?? $type.HOW.private_method_table($type){$name}
             !! $type.HOW.find_method($type, $name);
-        if !concrete($method) {
+        if !concrete($method) || $method !~~ Routine {
             # Optional dispatch and FALLBACK may handle a missing public method.
             my $private = $postfix ~~ RakuAST::Call::PrivateMethod;
             my $dispatch = $private ?? '' !! $postfix.dispatch;
             my $fallback = !$private && concrete($type.HOW.find_method($type, 'FALLBACK'));
             my $optional = $dispatch eq any('.?', '.*');
-            my $missing = $invocant.exact && !$fallback && !$optional && !$name.contains('::');
+            my $declared = $type.^mro.grep({ $_.HOW.method_table($_){$name}:exists }).elems;
+            my $missing = $invocant.exact && !$fallback && !$optional && !$name.contains('::') && !$declared;
+            if $fallback && $invocant.exact && !$optional && !$name.contains('::') {
+                my $provider = $type.HOW.find_method($type, 'FALLBACK');
+                if %!locals{id($provider)}:exists {
+                    my $result = self!dispatch($provider, [constant($name), |@pos], %named, $node,
+                        'FALLBACK ' ~ $name, :$invocant);
+                    self!effects($provider, %env, $postfix.args);
+                    return $result;
+                }
+            }
             if $!check-methods {
                 self!report($node, $missing ?? 'mismatch' !! 'unverifiable', 'method ' ~ $name,
                     :reason($missing
@@ -1739,6 +2142,18 @@ method !postfix($node, Fact $invocant, %env, $postfix = $node.postfix --> Fact) 
                         !! 'method lookup requires runtime dispatch'));
             }
             return unknown('unresolved method ' ~ $name);
+        }
+        if $invocant.known-entries && !@pos && !%named && $name eq any(<keys values elems>) {
+            return constant($invocant.entries.elems) if $name eq 'elems';
+            return self!sequence($name eq 'keys' ?? $invocant.keys !! $invocant.entries.values, :type(Seq));
+        }
+        if $*STATIC-HANDLER && !@pos && !%named && $name eq any(<resume rethrow>)
+            && same($method, Exception.HOW.find_method(Exception, $name)) {
+            if $name eq 'rethrow' {
+                @*STATIC-EXCEPTIONS.push($invocant);
+                return bottom(:exit-kind<throw>, :exception($invocant));
+            }
+            return bottom(:exit-kind<resume>);
         }
         if $name eq 'elems' && !@pos && !%named && $postfix.dispatch eq ''
             && $invocant.exact && $invocant.sequence
@@ -1753,15 +2168,15 @@ method !postfix($node, Fact $invocant, %env, $postfix = $node.postfix --> Fact) 
             return $invocant.definite >= 0 && $invocant.exact
                 ?? constant($invocant.definite == 1) !! known(Bool, :definite(1), :exact);
         }
-        if $name eq any(<pick roll map grep first pop shift>)
+        if $name eq any(<pick roll map grep first pop shift reduce classify categorize rotor>)
             && $postfix ~~ RakuAST::Call::Method && $postfix.dispatch eq ''
-            && !$uncertain && !%named && $invocant.exact && $invocant.sequence
+            && !$uncertain && (!%named || $name eq 'rotor' && %named.keys.grep(* ne 'partial').elems == 0) && $invocant.exact && $invocant.sequence
             && (same($type, List) || same($type, Array) || same($type, Seq)
                 || $invocant.constrained-elements && $invocant.element.defined
                     && same($type, Array[$invocant.element.type]))
             && same($method, $type.HOW.find_method($type, $name))
             && $method.package.^name eq any(<Any List Array Seq>) {
-            my $result = self!collection-op($name, $invocant, @pos, $node, %env);
+            my $result = self!collection-op($name, $invocant, @pos, $node, %env, :%named);
             return $result if $result.defined;
         }
         # CORE Mu.new/bless return the invocant class; a custom constructor
@@ -1777,9 +2192,11 @@ method !postfix($node, Fact $invocant, %env, $postfix = $node.postfix --> Fact) 
         my $virtual = !$invocant.exact && !$constructor && $postfix !~~ RakuAST::Call::PrivateMethod;
         my $result = self!dispatch($method, @pos, %named, $node, 'method ' ~ $name,
             :uncertain($uncertain || $virtual), :$invocant,
-            :known-return($constructor ?? known($type, :definite(1), :exact($invocant.exact)) !! Fact));
+            :known-return($constructor ?? known($type, :definite(1), :exact($invocant.exact)).clone(:identity(id($node))) !! Fact));
         self!effects($method, %env, $postfix.args);
-        self!invalidate($node.operand, %env) if concrete($invocant.element)
+        self!invalidate-dependent($invocant.identity, %env) if !$constructor
+            && !($method.package.^name eq any(<Mu Any Cool Int Str Rat Num List Array Seq>));
+        self!invalidate($node.operand, %env) if $node.^can('operand') && concrete($invocant.element)
             && !($name eq any(<elems end of keyof Bool defined item list hash keys values pairs head tail>));
         return merge($result, unknown('runtime subclass may override method ' ~ $name)) if $virtual;
         return $result;
@@ -1795,6 +2212,12 @@ method !postfix($node, Fact $invocant, %env, $postfix = $node.postfix --> Fact) 
             return $value;
         }
         self!index-key($postfix, $invocant, %env);
+        if $invocant.known-entries && $postfix ~~ RakuAST::Postcircumfix::HashIndex | RakuAST::Postcircumfix::LiteralHashIndex {
+            my $key = self!infer($postfix.index, %env);
+            $key = $key.items[0] if $key.finite && $key.items.elems == 1;
+            return $invocant.entries{$key.value.raku} // known(Any, :definite(0), :exact)
+                if $key.has-value && primitive($key.value);
+        }
         if $postfix ~~ RakuAST::Postcircumfix::ArrayIndex && $invocant.finite {
             my $index = self!infer($postfix.index, %env);
             if $index.has-value && $index.value ~~ Int && $index.value >= 0 {
@@ -1840,7 +2263,9 @@ method !statements($list, %env --> Fact) {
     for @exceptions.unique(:as(*.key)) -> $exception {
         my $caught = False;
         for @handlers -> $handler {
-            next if $handler ~~ RakuAST::Statement::Control && nqp::istype($exception.type, Exception);
+            next if $handler ~~ RakuAST::Statement::Control && $exception.exact && !nqp::istype($exception.type, X::Control);
+            next if $handler ~~ RakuAST::Statement::Catch && $exception.exact && nqp::istype($exception.type, X::Control);
+            my $*STATIC-HANDLER = True;
             my %branch = clone-env(%before);
             my Fact $*STATIC-TOPIC = $exception;
             my $handled = self!given($handler.body.body.statement-list, %branch, :handler);

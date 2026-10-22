@@ -1,6 +1,18 @@
 Revision history for static
 
 {{$NEXT}}
+  - Reject reachable return/return-rw without an enclosing Routine, including
+    eager collection callbacks at unit scope.
+  - Analyze finite callback batches, optional arguments and Slip results, plus
+    reduce/classify/categorize, rotor, zip/cross and dynamic selection counts.
+  - Infer loop elements and bounded state, empty/repeat/infinite paths and
+    last/next exits; preserve conservative widening for unknown loops.
+  - Resolve finite callable/computed-method alternatives and local FALLBACK;
+    reuse compiler-created custom generic witnesses without executing providers.
+  - Invalidate nested tracked aliases, propagate eager callback effects and
+    nonlocal returns, and retain lazy callback exception summaries.
+  - Model Failure returns and known CONTROL/resume/rethrow paths; extend bounded
+    primitive string, numeric, collection and interval predicate rules.
   - Report unreachable code by default with policy-dependent warning/failure,
     with :check-unreachable and --/check-unreachable opt-out.
   - Refine constant/type/definedness branches, short-circuit paths and integer

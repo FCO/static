@@ -16,7 +16,7 @@ my @cases =
     ['array shape', 'my Int @a[2]=1,2'],
     ['destructuring declaration', 'my (Int $x, Str $y) = 1,"s"'];
 for @cases -> [$name, $source] {
-    my $supported = $name eq any('given and when','exception path','exception handler','gather','async start','supply','hyper method','array shape','destructuring declaration');
+    my $supported = $name eq any('quoted method','given and when','exception path','exception handler','gather','async start','supply','hyper method','array shape','destructuring declaration');
     for <fail-on-mismatch fail-on-unverifiable> -> $mode {
         my ($code, $out) = compile($source, :$mode);
         is $code == 0, $supported || $mode eq 'fail-on-mismatch', "$name / $mode";

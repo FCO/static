@@ -1,0 +1,84 @@
+use Test;
+use lib 't/lib';
+use Compile;
+my @cases =
+    ['first return outside routine', '[1,2].first: {return "bla"}', 'mismatch'],
+    ['first return-rw outside routine', '[1,2].first: {return-rw "bla"}', 'mismatch'],
+    ['top-level return', 'return "bla"', 'mismatch'],
+    ['empty first callback does not run', '[].first: {return "bla"}', 'ok'],
+    ['unreachable callback return', '[1,2].first: {if False {return "bla"}; True}', 'ok'],
+    ['callback routine owns return', 'my Int $n=[1,2].first: sub ($x) {return $x}', 'ok'],
+    ['eager callback nonlocal return', 'sub f(--> Int) {(1,2).reduce(-> $a,$b {return "bad"}); 1}; f()', 'mismatch'],
+    ['first nonlocal return', 'sub f(--> Int) {(1,2).first({return "bad"}); 1}; f()', 'mismatch'],
+    ['eager callback captures', 'my $x=0; (1,2).reduce(-> $a,$b {$x="bad"; $a+$b}); my Int $n=$x', 'mismatch'],
+    ['source mutation', 'my @a=1,2; for @a -> $x {@a.push("bad"); my Int $n=$x}', 'unverifiable'],
+    ['for homogeneous signature', 'for 1..1000 -> Str $s {1}', 'mismatch'],
+    ['lazy callback exception', 'sub f(--> Int) {CATCH {when X::AdHoc {return "bad"}}; my Int @a=(1,2).map(-> $x {die "x"}); 1}; f()', 'mismatch'],
+    ['nested zip budget', 'my $s=zip(1..300,1..300); sub f(Int $n where * == 300) {1}; f($s.elems)', 'ok'],
+    ['rotor invalidation', 'my @a=1,2,3; my $s=@a.rotor(2); @a.push(4); sub f(Int $n where * == 1) {1}; f($s.elems)', 'unverifiable'],
+    ['custom parameterizer remains non-executing', 'role Box[::T] {}; sub f(::T $x, Box[T] $b) {1}; sub g(Box[Int] $b) {f(1,$b)}', 'ok'],
+    ['finite callable targets', 'sub a(Int $x --> Int) {1}; sub b(Int $x --> Int) {2}; sub f(Bool $flag) {my &g=$flag ?? &a !! &b; my Int $n=g(1)}', 'ok'],
+    ['finite computed names', 'sub f(Bool $flag) {my $m=$flag ?? "chars" !! "elems"; my Int $n="abc"."$m"()}', 'ok'],
+    ['map batches', 'my Int @a=(1,2,3,4).map(-> $a,$b {$a+$b})', 'ok'],
+    ['map short batch', 'my Int @a=(1,2,3).map(-> $a,$b {$a+$b})', 'mismatch'],
+    ['map optional batch', 'my Int @a=(1,2,3).map(-> $a,$b=0 {$a+$b})', 'ok'],
+    ['Whatever batches', 'my Int @a=(1,2,3,4).map(*+*)', 'ok'],
+    ['Slip flattening', 'my Int @a=(1,2).map(-> $x {slip $x,$x})', 'ok'],
+    ['bad Slip element', 'my Int @a=(1,2).map(-> $x {slip $x,"bad"})', 'mismatch'],
+    ['reduce', 'my Int $n=(1,2,3).reduce(-> $a,$b {$a+$b})', 'ok'],
+    ['bad reduce result', 'my Int $n=(1,2).reduce(-> $a,$b {"bad"})', 'mismatch'],
+    ['empty reduce signature', 'my $n=().reduce(-> $a,$b {$a+$b})', 'mismatch'],
+    ['rotor', 'my List @a=(1,2,3,4).rotor(2)', 'ok'],
+    ['rotor partial', 'my List @a=(1,2,3).rotor(2,:partial)', 'ok'],
+    ['rotor scalar mismatch', 'my Int @a=(1,2,3).rotor(2)', 'mismatch'],
+    ['zip', 'my List @a=zip((1,2),("a","b"))', 'ok'],
+    ['cross', 'my List @a=cross((1,2),("a","b"))', 'ok'],
+    ['classify projection', 'my $h=(1,2).classify(-> $x {"a"}); my Array $a=$h<a>', 'ok'],
+    ['classify value mismatch', 'my $h=(1,2).classify(-> $x {"a"}); my Int $a=$h<a>', 'mismatch'],
+    ['classify typed hash', 'my Array %h=(1,2).classify(-> $x {"a"}); my Array @a=%h.values', 'ok'],
+    ['categorize', 'my $h=(1,2).categorize(-> $x {("a","b")}); my Array $a=$h<a>', 'ok'],
+    ['dynamic selection count', 'sub f(Int:D $n) {my Int @a=(1,2).pick($n)}', 'ok'],
+    ['for variable inference', 'for (1,2) -> $x {my Int $n=$x}', 'ok'],
+    ['for incompatible element', 'for (1,"bad") -> $x {my Int $n=$x}', 'mismatch'],
+    ['for topic inference', 'my Int @a=do for (1,2) {$_+1}', 'ok'],
+    ['range inference', 'my Int @a=do for 1..3 {$_+1}', 'ok'],
+    ['empty loop', 'for () {my Int $x="bad"}', 'ok'],
+    ['false while', 'while False {my Int $x="bad"}', 'ok'],
+    ['repeat until executes once', 'repeat {my Int $x="bad"} until True', 'mismatch'],
+    ['repeat executes once', 'repeat {my Int $x="bad"} while False', 'mismatch'],
+    ['last continues outside', 'my $x=0; for 1,2 {$x=1; last}; my Int $n=$x', 'ok'],
+    ['next skips dead body', 'for 1,2 {next; my Int $n="bad"}', 'unreachable'],
+    ['loop must return', 'sub f {for 1,2 {return 1}; 2}', 'unreachable'],
+    ['constant infinite loop', 'sub f {loop {}; 2}', 'unreachable'],
+    ['bounded while state', 'my $x=0; while $x < 3 {$x=$x+1}; sub f(Int $n where * == 3) {1}; f($x)', 'ok'],
+    ['computed method', 'my $m="chars"; my Int $n="abc"."$m"()', 'ok'],
+    ['computed missing method', 'my $m="missing"; "abc"."$m"()', 'mismatch'],
+    ['local FALLBACK', 'class C {method FALLBACK(Str $name, *@args --> Int) {1}}; my Int $n=C.new.missing()', 'ok'],
+    ['FALLBACK return mismatch', 'class C {method FALLBACK(Str $name, *@args --> Str) {"a"}}; my Int $n=C.new.missing()', 'mismatch'],
+    ['custom generic witness', 'role Box[::T] {}; class B does Box[Int] {}; sub f(::T $x, Box[T] $b --> Box[T]) {$b}; my Box[Int] $b=B.new; f(1,$b)', 'ok'],
+    ['custom generic incompatible', 'role Box[::T] {}; class B does Box[Str] {}; sub f(::T $x, Box[T] $b) {1}; my Box[Int] $w; my Box[Str] $b=B.new; f(1,$b)', 'mismatch'],
+    ['nested mutation invalidation', 'my $a=[1]; my $b=[$a]; $a.push("bad"); my Int $n=$b[0][0]', 'unverifiable'],
+    ['string predicate', 'sub f(Str $s where *.starts-with("ab")) {1}; f("abc")', 'ok'],
+    ['string predicate mismatch', 'sub f(Str $s where *.contains("ab")) {1}; f("xyz")', 'mismatch'],
+    ['string transforms', 'my Str $s=" ABC ".trim.lc.substr(0,2)', 'ok'],
+    ['numeric predicate', 'sub f(Int $n where *.abs > 0) {1}; f(-1)', 'ok'],
+    ['bounded multiplication', 'sub pos(Int $n where * > 0) {1}; sub f(Int $n) {if $n > 0 {pos($n*2)}}', 'ok'],
+    ['fail return contract', 'sub f(--> Int) {fail "x"}; my Int $n=f()', 'mismatch'],
+    ['fail terminates', 'sub f {fail "x"; 1}', 'unreachable'],
+    ['warn control handler', 'sub f {CONTROL {when CX::Warn {my Int $n="bad"}}; warn "x"}; f()', 'mismatch'],
+    ['resume handler', 'sub f {CONTROL {when CX::Warn {.resume}}; warn "x"; 1}; my Int $n=f()', 'ok'];
+for @cases -> [$name,$source,$status] {
+    my ($code,$out)=compile($source,:mode<fail-on-unverifiable>);
+    is $code == 0, $status eq 'ok', $name;
+    like $out, /'[static:' $status ']'/, "$name diagnostic" unless $status eq 'ok';
+    unlike $out, /'while evaluating a CHECK'/, "$name never crashes";
+    unlike $out, /'Use of uninitialized value'/, "$name has no analyzer warnings";
+    diag $out if ($code == 0) != ($status eq 'ok');
+}
+for <fail-on-mismatch fail-on-unverifiable warn-on-mismatch warn-on-unverifiable> -> $mode {
+    my ($code, $out) = compile('[1,2].first: {return "bla"}', :$mode);
+    is $code == 0, $mode.starts-with('warn-'), "return outside Routine / $mode";
+    like $out, /'[static:mismatch]' .* 'Attempt to return outside of any Routine'/,
+        "return outside Routine diagnostic / $mode";
+}
+done-testing;
