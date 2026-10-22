@@ -21,6 +21,14 @@ platform jobs completing on GitHub.
 | CLI | Files/stdin, per-unit isolation, include-path forwarding, repeatable -I/-M, policies, exit status and original source locations | `t/14-cli` |
 | Explicit uncertainty | Dynamic destructuring, proxies/raw containers, indirect calls, dynamic symbols/methods, regex constraints, EVAL, virtual/role dispatch, opaque smartmatches, dynamic dimensions/indices and hyper shapes, deferred mutation | `t/09-signature-coverage`, `t/12-dynamic-coverage` |
 
+`t/16-expanded-analysis` covers branch narrowing, integer bounds, dependent
+parameter predicates, finite named/positional captures, known indirect calls,
+collection callbacks and selection counts, lazy-source and alias invalidation,
+closure signatures/captured writes, custom matcher safety, shared removal state, nested generic
+contracts, typed handlers, and unreachable-code policies/opt-out. CLI opt-out is
+covered in `t/14-cli`. Unreachable diagnostics are an intentional behavior change:
+all four policies select them unless `:!check-unreachable` is supplied.
+
 An inconclusive test must pass `fail-on-mismatch` and produce a
 `[static:unverifiable]` compilation error under `fail-on-unverifiable`.
 Predicates also exercise both warning policies. Unsupported constructs must

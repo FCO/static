@@ -36,6 +36,7 @@ sub MAIN(
     Str :$policy = 'fail-on-mismatch',
     Bool :$external-signatures = True,
     Bool :$check-methods = True,
+    Bool :$check-unreachable = True,
     *@files, #= Files to check; omit or use - to read stdin
 ) {
     my @policies = <fail-on-mismatch warn-on-mismatch fail-on-unverifiable warn-on-unverifiable>;
@@ -60,7 +61,7 @@ sub MAIN(
         .grep({ $_ ~~ CompUnit::Repository::FileSystem
             || $_ ~~ CompUnit::Repository::Installation })
         .map({ '-I' ~ .path-spec });
-    my $module = '-Mstatic::CLI ' ~ ($policy, ~$external-signatures.Int, ~$check-methods.Int)
+    my $module = '-Mstatic::CLI ' ~ ($policy, ~$external-signatures.Int, ~$check-methods.Int, ~$check-unreachable.Int)
         .map({ '"' ~ $_ ~ '"' }).join(',');
     my $failed = False;
     for @inputs -> $input {

@@ -1,7 +1,7 @@
 use static;
 
 # Register against the importing unit, without changing its source text.
-sub EXPORT($policy = 'fail-on-mismatch', $external = '1', $methods = '1') {
+sub EXPORT($policy = 'fail-on-mismatch', $external = '1', $methods = '1', $unreachable = '1') {
     my $cu = $*CU;
     my %policies =
         'fail-on-mismatch' => &fail-on-mismatch,
@@ -11,6 +11,6 @@ sub EXPORT($policy = 'fail-on-mismatch', $external = '1', $methods = '1') {
     die "Unknown static policy: $policy" unless %policies{$policy}:exists;
     my &check = %policies{$policy};
     $cu.add-check-code({ check($cu,
-        :external-signatures($external eq '1'), :check-methods($methods eq '1')) });
+        :external-signatures($external eq '1'), :check-methods($methods eq '1'), :check-unreachable($unreachable eq '1')) });
     Map.new
 }

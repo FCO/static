@@ -26,7 +26,7 @@ is $code, 1, 'coercion success is not assumed';
 like $output, /'[static:unverifiable]'/, 'coercion execution remains a runtime matter';
 ($code, $output) = compile('my &f = sub { 1 }; my Int $x = f()', :mode<warn-on-unverifiable>);
 is $code, 0, 'indirect call does not crash checker';
-like $output, /'[static:unverifiable]'/, 'indirect call is inconclusive';
+unlike $output, /'[static:unverifiable]'/, 'known local indirect call is resolved';
 ($code, $output) = compile('sub value() { "s" }; my int $x = value()');
 is $code, 1, 'native contract rejects incompatible nominal type';
 like $output, /'[static:mismatch]'/, 'native mismatch is diagnosed';

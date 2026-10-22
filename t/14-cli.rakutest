@@ -101,4 +101,13 @@ for '-I', '-M' -> $option {
     ($exit, $out) = cli([$option]);
     is $exit, 2, "$option requires an argument";
 }
+($exit, $out) = cli([], :stdin('sub f { return 1; say "never" }'));
+is $exit, 1, 'unreachable code fails by default';
+ok $out.contains('[static:unreachable]'), 'unreachable category forwarded';
+($exit, $out) = cli(['--/check-unreachable'], :stdin('sub f { return 1; say "never" }'));
+is $exit, 0, 'CLI can disable unreachable diagnostics';
+nok $out.contains('[static:unreachable]'), 'unreachable opt out forwarded to compiler';
+($exit, $out) = cli(['--policy=warn-on-mismatch'], :stdin('sub f { return 1; say "never" }'));
+is $exit, 0, 'CLI warning policy preserves unreachable warning';
+ok $out.contains('[static:unreachable]'), 'warning policy includes unreachable diagnostic';
 done-testing;

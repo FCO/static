@@ -1,6 +1,14 @@
 Revision history for static
 
 {{$NEXT}}
+  - Report unreachable code by default with policy-dependent warning/failure,
+    with :check-unreachable and --/check-unreachable opt-out.
+  - Refine constant/type/definedness branches, short-circuit paths and integer
+    intervals; evaluate predicates using earlier parameter bindings.
+  - Analyze CORE collection callbacks, counted pick/roll and pop/shift state.
+  - Resolve known indirect calls, finite captures and nested CORE generic contracts.
+  - Track normal returns, explicit throws and termination separately, propagate
+    local exception summaries and preserve deferred Promise exceptions.
 
 0.0.1  2026-10-22T01:08:37+01:00
   - Disable Mi6 README generation from Pod to preserve the maintained README.md.

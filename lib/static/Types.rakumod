@@ -12,8 +12,12 @@ class Fact is export {
     has Bool $.exact = False;
     has Str $.reason = '';
     has Bool $.bottom = False;
+    has Str $.exit-kind = '';
+    has Mu $.exception;
     has Bool $.sequence = False;
     has Bool $.finite = False;
+    has Int $.cardinality = -1;
+    has Bool $.infinite = False;
     has @.items;
     has @.alternatives;
     has Mu $.element;
@@ -25,24 +29,35 @@ class Fact is export {
     # the nominal type of a value (a literal Int is not a writable Scalar).
     has Int $.writable = -1;
     has Str $.identity = '';
+    has @.dependencies;
     has @.shape;
     has Mu $.payload;
+    has Mu $.callable;
+    has Mu $.body;
+    has Mu $.owner;
+    has %.named;
+    has Mu $.lower;
+    has Mu $.upper;
     method label() {
         return '<no value>' if $!bottom;
         return "unknown ($!reason)" if $!reason && same($!type, Mu);
         $!type.^name ~ ($!definite == 1 ?? ':D' !! $!definite == 0 ?? ':U' !! '')
     }
     method key() {
-        (nqp::objectid($!type), $!definite, +$!exact, $!reason, +$!bottom,
-         +$!sequence, +$!finite, @!items.map(*.key).join(';'),
+        (nqp::objectid($!type), $!definite, +$!exact, $!reason, +$!bottom, $!exit-kind,
+         $!exception.defined ?? $!exception.key !! '',
+         +$!sequence, +$!finite, $!cardinality, +$!infinite, @!items.map(*.key).join(';'),
          @!alternatives.map(*.key).sort.join('|'),
          $!has-value ?? $!value.raku !! '', nqp::objectid($!key-type), +$!constrained-elements,
-         $!writable, $!identity, @!shape.join(','), $!payload.defined ?? $!payload.key !! '').join('/')
+         $!writable, $!identity, @!dependencies.sort.join(';'), @!shape.join(','), $!payload.defined ?? $!payload.key !! '', nqp::objectid($!callable), nqp::objectid($!body), nqp::objectid($!owner), %!named.keys.sort.map({ $_ ~ '=' ~ %!named{$_}.key }).join(';'),
+         $!lower.defined ?? $!lower.Str !! '', $!upper.defined ?? $!upper.Str !! '').join('/')
     }
 }
 
 sub unknown(Str $reason --> Fact) is export { Fact.new(:$reason) }
-sub bottom(--> Fact) is export { Fact.new(:bottom) }
+sub bottom(Str :$exit-kind = '', Fact :$exception = Fact --> Fact) is export {
+    Fact.new(:bottom, :$exit-kind, :$exception)
+}
 sub primitive(Mu $value --> Bool) is export {
     so (Int, Rat, FatRat, Num, Str, Bool).grep({ same($value.WHAT, $_) }).elems
 }
@@ -62,7 +77,15 @@ sub known(Mu $type, Int :$definite = -1, Bool :$exact = False --> Fact) is expor
 }
 sub merge(*@facts --> Fact) is export {
     my @live = @facts.grep({ $_ ~~ Fact && !.bottom });
-    return bottom unless @live;
+    unless @live {
+        my @dead = @facts.grep(* ~~ Fact);
+        # The initial fixed-point bottom carries no exit information. It must
+        # not erase a subsequently established terminating routine summary.
+        my @kinds = @dead.map(*.exit-kind).grep(*.chars).unique;
+        my @exceptions = @dead.map(*.exception).grep(*.defined);
+        return bottom(:exit-kind(@kinds == 1 ?? @kinds[0] !! @kinds ?? 'abrupt' !! ''),
+            :exception(@exceptions ?? merge(|@exceptions) !! Fact));
+    }
     my @alts = @live.map({ .alternatives ?? .alternatives.List !! ($_,).List }).flat;
     @alts = @alts.unique(:as(*.key));
     return @alts[0] if @alts == 1;

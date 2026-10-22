@@ -68,7 +68,7 @@ my @cases =
     ['try body mismatch', 'try {my Int $n="bad"}', 'mismatch'],
     ['catch body mismatch', 'sub f() {CATCH {default {my Int $n="bad"}}; die "x"}; f()', 'mismatch'],
     ['catch after die', 'sub f() {die "x"; CATCH {default {my Int $n="bad"}}}; f()', 'mismatch'],
-    ['control body mismatch', 'sub f() {CONTROL {default {my Int $n="bad"}}; 1}; f()', 'mismatch'],
+    ['unreached control handler', 'sub f() {CONTROL {default {my Int $n="bad"}}; 1}; f()', 'ok'],
     ['catch return contract', 'sub f(--> Int) {CATCH {default {}}; 1}; my Int $n=f()', 'ok'],
     ['caught return', 'sub f(--> Int) {CATCH {default {return "bad"}}; die "x"}; f()', 'mismatch'],
     ['try partial write', 'my $x=1; try {$x="bad"; die "x"}; my Int $n=$x', 'unverifiable'],

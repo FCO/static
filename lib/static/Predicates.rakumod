@@ -4,13 +4,61 @@ unit module static::Predicates;
 
 # An interpreter for a deliberately bounded, pure subset of expressions.
 # It never invokes a routine/regex/coercion from the inspected program.
-sub core-operator($op --> Bool) {
+sub core-operator($op --> Bool) is export {
     so $op ~~ RakuAST::Lookup && $op.is-resolved
         && $op.resolution ~~ RakuAST::Declaration::External::Setting
 }
 
+# Smartmatch against a nominal type is only a type test when ACCEPTS is a
+# known CORE implementation. Inspect metadata; never call that method.
+sub nominal-matcher(Mu $type --> Bool) is export {
+    return False if $type.HOW.^name.contains('Subset') || $type.^archetypes.generic
+        || !$type.HOW.^can('find_method');
+    my $method = $type.HOW.find_method($type, 'ACCEPTS');
+    so (Mu, Any, Cool, Numeric, Real, Int, Rat, FatRat, Num, Str, Bool)
+        .grep({ same($method, $_.HOW.find_method($_, 'ACCEPTS')) }).elems
+}
+
+# Bounds are inclusive and restricted to primitive integer arithmetic.
+sub interval-operation(Str $op, @args --> Fact) {
+    return unknown('no integer interval rule') unless @args == 2
+        && @args.grep({ !same(.type, Int) || .reason }).elems == 0;
+    my @lo = @args.map({ .has-value ?? .value !! .lower });
+    my @hi = @args.map({ .has-value ?? .value !! .upper });
+    return unknown('interval budget exceeded') if (|@lo, |@hi).grep({ .defined && .base(2).chars > 4096 });
+    if $op eq any('<', '<=', '>', '>=', '==', '!=') {
+        my $yes = False;
+        my $no = False;
+        given $op {
+            when '<' { $yes = @hi[0].defined && @lo[1].defined && @hi[0] < @lo[1]; $no = @lo[0].defined && @hi[1].defined && @lo[0] >= @hi[1] }
+            when '<=' { $yes = @hi[0].defined && @lo[1].defined && @hi[0] <= @lo[1]; $no = @lo[0].defined && @hi[1].defined && @lo[0] > @hi[1] }
+            when '>' { $yes = @lo[0].defined && @hi[1].defined && @lo[0] > @hi[1]; $no = @hi[0].defined && @lo[1].defined && @hi[0] <= @lo[1] }
+            when '>=' { $yes = @lo[0].defined && @hi[1].defined && @lo[0] >= @hi[1]; $no = @hi[0].defined && @lo[1].defined && @hi[0] < @lo[1] }
+            when '==' | '!=' {
+                $no = @hi[0].defined && @lo[1].defined && @hi[0] < @lo[1]
+                    || @hi[1].defined && @lo[0].defined && @hi[1] < @lo[0];
+                $yes = @lo[0].defined && @hi[0].defined && @lo[1].defined && @hi[1].defined
+                    && @lo[0] == @hi[0] == @lo[1] == @hi[1];
+                ($yes, $no) = ($no, $yes) if $op eq '!=';
+            }
+        }
+        return constant(True) if $yes;
+        return constant(False) if $no;
+    }
+    if $op eq any('+', '-') {
+        my $lower = $op eq '+'
+            ?? (@lo[0].defined && @lo[1].defined ?? @lo[0]+@lo[1] !! Mu)
+            !! (@lo[0].defined && @hi[1].defined ?? @lo[0]-@hi[1] !! Mu);
+        my $upper = $op eq '+'
+            ?? (@hi[0].defined && @hi[1].defined ?? @hi[0]+@hi[1] !! Mu)
+            !! (@hi[0].defined && @lo[1].defined ?? @hi[0]-@lo[1] !! Mu);
+        return Fact.new(:type(Int), :definite(1), :$lower, :$upper) if $lower.defined || $upper.defined;
+    }
+    unknown('integer interval is inconclusive')
+}
+
 sub operation(Str $op, @args --> Fact) is export {
-    return unknown('nonconstant operands') unless @args && @args.grep({ !.has-value }).elems == 0;
+    return interval-operation($op, @args) unless @args && @args.grep({ !.has-value }).elems == 0;
     return unknown('non-primitive operands') if @args.grep({ !primitive(.value) });
     my @v = @args.map(*.value);
     my $numeric = @v.grep({ $_ !~~ Numeric }).elems == 0;
@@ -86,7 +134,7 @@ sub unwrap($node) {
     }
 }
 
-sub evaluate($original, Fact $topic, &type-of, &compatible, Str :$name = '', Int :$depth = 0 --> Fact) is export {
+sub evaluate($original, Fact $topic, &type-of, &compatible, Str :$name = '', Int :$depth = 0, :%bindings = {} --> Fact) is export {
     return unknown('predicate analysis depth exceeded') if $depth > 64;
     my $node = unwrap($original);
     return unknown('predicate requires statement execution') unless $node.defined;
@@ -98,6 +146,10 @@ sub evaluate($original, Fact $topic, &type-of, &compatible, Str :$name = '', Int
         when RakuAST::Term::Whatever | RakuAST::VarDeclaration::Placeholder::Positional { return $topic }
         when RakuAST::WhateverCode::Argument { return .name eq '_whatever_arg_1' ?? $topic !! unknown('predicate needs more than one argument') }
         when RakuAST::Var::Lexical {
+            if .is-resolved {
+                my $decl = .resolution ~~ RakuAST::ParameterTarget::Var ?? .resolution.declaration !! .resolution;
+                return %bindings{nqp::objectid($decl).Str} if %bindings{nqp::objectid($decl).Str}:exists;
+            }
             return $topic if .name eq '$_' || ($name && .name eq $name);
             if .is-resolved && .resolution ~~ RakuAST::VarDeclaration::Constant {
                 return constant(.resolution.compile-time-value);
@@ -106,27 +158,27 @@ sub evaluate($original, Fact $topic, &type-of, &compatible, Str :$name = '', Int
         when RakuAST::Term::Enum { return constant(type-of($_)) }
         when RakuAST::ApplyPrefix {
             if core-operator(.prefix) {
-                my $value = evaluate(.operand, $topic, &type-of, &compatible, :$name, :depth($depth+1));
+                my $value = evaluate(.operand, $topic, &type-of, &compatible, :$name, :depth($depth+1), :%bindings);
                 return operation(.prefix.operator, [$value]);
             }
         }
         when RakuAST::ApplyInfix {
             if core-operator(.infix) {
                 my $op = .infix.operator;
-                my $left = evaluate(.left, $topic, &type-of, &compatible, :$name, :depth($depth+1));
+                my $left = evaluate(.left, $topic, &type-of, &compatible, :$name, :depth($depth+1), :%bindings);
                 if $op eq '~~' || $op eq '!~~' {
-                    my $status = constraint-status(.right, $left, &type-of, &compatible, :$name, :depth($depth+1));
+                    my $status = constraint-status(.right, $left, &type-of, &compatible, :$name, :depth($depth+1), :%bindings);
                     return constant(($status eq 'ok') ^^ ($op eq '!~~')) unless $status eq 'unverifiable';
                 }
                 if $op eq any('&&', 'and') && $left.has-value && !$left.value { return $left }
                 if $op eq any('||', 'or') && $left.has-value && $left.value { return $left }
-                my $right = evaluate(.right, $topic, &type-of, &compatible, :$name, :depth($depth+1));
+                my $right = evaluate(.right, $topic, &type-of, &compatible, :$name, :depth($depth+1), :%bindings);
                 return operation($op, [$left, $right]);
             }
         }
         when RakuAST::ApplyPostfix {
             if .postfix ~~ RakuAST::Call::Method && .postfix.args.args.elems == 0 {
-                my $value = evaluate(.operand, $topic, &type-of, &compatible, :$name, :depth($depth+1));
+                my $value = evaluate(.operand, $topic, &type-of, &compatible, :$name, :depth($depth+1), :%bindings);
                 my $method = .postfix.name.canonicalize;
                 return constant($value.definite == 1) if $method eq 'defined' && $value.definite >= 0 && $value.exact
                     && same($value.type.HOW.find_method($value.type, 'defined'), Mu.^find_method('defined'));
@@ -138,18 +190,21 @@ sub evaluate($original, Fact $topic, &type-of, &compatible, Str :$name = '', Int
     unknown('predicate contains unsupported or dynamic code')
 }
 
-sub constraint-status($original, Fact $actual, &type-of, &compatible, Str :$name = '', Int :$depth = 0 --> Str) is export {
+sub constraint-status($original, Fact $actual, &type-of, &compatible, Str :$name = '', Int :$depth = 0, :%bindings = {} --> Str) is export {
     return 'unverifiable' if $depth > 64 || $actual.reason;
     if $actual.alternatives {
-        my @statuses = $actual.alternatives.map({ constraint-status($original, $_, &type-of, &compatible, :$name, :depth($depth+1)) }).unique;
+        my @statuses = $actual.alternatives.map({ constraint-status($original, $_, &type-of, &compatible, :$name, :depth($depth+1), :%bindings) }).unique;
         return @statuses == 1 ?? @statuses[0] !! 'unverifiable';
     }
     my $node = unwrap($original);
     return 'unverifiable' unless $node.defined;
     my $callable = $original ~~ RakuAST::Block;
-    return compatible($actual, type-of($node)) if !$callable && $node ~~ RakuAST::Type;
+    if !$callable && $node ~~ RakuAST::Type {
+        my Mu $type = type-of($node);
+        return nominal-matcher($type) ?? compatible($actual, $type) !! 'unverifiable';
+    }
     if !$callable && $node ~~ RakuAST::ApplyListInfix && core-operator($node.infix) && $node.infix.operator eq any('|', '&', '^') {
-        my @statuses = $node.operands.map({ constraint-status($_, $actual, &type-of, &compatible, :$name, :depth($depth+1)) });
+        my @statuses = $node.operands.map({ constraint-status($_, $actual, &type-of, &compatible, :$name, :depth($depth+1), :%bindings) });
         given $node.infix.operator {
             when '|' { return 'ok' if @statuses.grep(* eq 'ok'); return @statuses.grep(* eq 'unverifiable') ?? 'unverifiable' !! 'mismatch' }
             when '&' { return 'mismatch' if @statuses.grep(* eq 'mismatch'); return @statuses.grep(* eq 'unverifiable') ?? 'unverifiable' !! 'ok' }
@@ -157,15 +212,15 @@ sub constraint-status($original, Fact $actual, &type-of, &compatible, Str :$name
         }
     }
     if !$callable && $node ~~ RakuAST::ApplyInfix && core-operator($node.infix) && $node.infix.operator eq any('..', '^..', '..^', '^..^') {
-        my $lo = evaluate($node.left, $actual, &type-of, &compatible, :$name, :depth($depth+1));
-        my $hi = evaluate($node.right, $actual, &type-of, &compatible, :$name, :depth($depth+1));
+        my $lo = evaluate($node.left, $actual, &type-of, &compatible, :$name, :depth($depth+1), :%bindings);
+        my $hi = evaluate($node.right, $actual, &type-of, &compatible, :$name, :depth($depth+1), :%bindings);
         return 'unverifiable' unless $actual.has-value && $lo.has-value && $hi.has-value;
         my $lower = operation($node.infix.operator.starts-with('^') ?? '>' !! '>=', [$actual, $lo]);
         my $upper = operation($node.infix.operator.ends-with('^') ?? '<' !! '<=', [$actual, $hi]);
         return 'unverifiable' unless $lower.has-value && $upper.has-value;
         return $lower.value && $upper.value ?? 'ok' !! 'mismatch';
     }
-    my $result = evaluate($node, $actual, &type-of, &compatible, :$name, :$depth);
+    my $result = evaluate($node, $actual, &type-of, &compatible, :$name, :$depth, :%bindings);
     return 'unverifiable' unless $result.has-value;
     # Literal where constraints smartmatch the candidate; a block/Whatever
     # expression is a predicate whose result is interpreted as a Bool.

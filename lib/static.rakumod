@@ -8,11 +8,11 @@ class CheckFailure does X::Comp is export(:types) {
     method message() { @!diagnostics.join("\n") }
 }
 
-sub check-unit($cu, Bool :$strict, Bool :$fatal, Bool :$external-signatures, Bool :$check-methods --> List) is hidden-from-backtrace {
+sub check-unit($cu, Bool :$strict, Bool :$fatal, Bool :$external-signatures, Bool :$check-methods, Bool :$check-unreachable --> List) is hidden-from-backtrace {
     die 'static must be called in CHECK with a RakuAST::CompUnit (normally $*CU)'
         unless $cu ~~ RakuAST::CompUnit:D;
-    my @diagnostics = static::Analyzer.new(:$external-signatures, :$check-methods).analyze($cu)
-        .grep({ $strict || .category eq 'mismatch' });
+    my @diagnostics = static::Analyzer.new(:$external-signatures, :$check-methods, :$check-unreachable).analyze($cu)
+        .grep({ $strict || .category eq any(<mismatch unreachable>) });
     if $fatal && @diagnostics {
         # Throwing out of CHECK gets wrapped at the phaser's source location.
         # Register a compiler diagnostic instead, then locate it at the first
@@ -34,15 +34,15 @@ sub check-unit($cu, Bool :$strict, Bool :$fatal, Bool :$external-signatures, Boo
     @diagnostics.List
 }
 
-sub warn-on-mismatch($cu = $*CU, Bool :$external-signatures = True, Bool :$check-methods = True --> List) is export is hidden-from-backtrace {
-    check-unit($cu, :!strict, :!fatal, :$external-signatures, :$check-methods)
+sub warn-on-mismatch($cu = $*CU, Bool :$external-signatures = True, Bool :$check-methods = True, Bool :$check-unreachable = True --> List) is export is hidden-from-backtrace {
+    check-unit($cu, :!strict, :!fatal, :$external-signatures, :$check-methods, :$check-unreachable)
 }
-sub fail-on-mismatch($cu = $*CU, Bool :$external-signatures = True, Bool :$check-methods = True --> List) is export is hidden-from-backtrace {
-    check-unit($cu, :!strict, :fatal, :$external-signatures, :$check-methods)
+sub fail-on-mismatch($cu = $*CU, Bool :$external-signatures = True, Bool :$check-methods = True, Bool :$check-unreachable = True --> List) is export is hidden-from-backtrace {
+    check-unit($cu, :!strict, :fatal, :$external-signatures, :$check-methods, :$check-unreachable)
 }
-sub warn-on-unverifiable($cu = $*CU, Bool :$external-signatures = True, Bool :$check-methods = True --> List) is export is hidden-from-backtrace {
-    check-unit($cu, :strict, :!fatal, :$external-signatures, :$check-methods)
+sub warn-on-unverifiable($cu = $*CU, Bool :$external-signatures = True, Bool :$check-methods = True, Bool :$check-unreachable = True --> List) is export is hidden-from-backtrace {
+    check-unit($cu, :strict, :!fatal, :$external-signatures, :$check-methods, :$check-unreachable)
 }
-sub fail-on-unverifiable($cu = $*CU, Bool :$external-signatures = True, Bool :$check-methods = True --> List) is export is hidden-from-backtrace {
-    check-unit($cu, :strict, :fatal, :$external-signatures, :$check-methods)
+sub fail-on-unverifiable($cu = $*CU, Bool :$external-signatures = True, Bool :$check-methods = True, Bool :$check-unreachable = True --> List) is export is hidden-from-backtrace {
+    check-unit($cu, :strict, :fatal, :$external-signatures, :$check-methods, :$check-unreachable)
 }

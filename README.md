@@ -34,7 +34,8 @@ compiled independently; imported units are not analyzed. Original file paths and
 line numbers are preserved. All inputs are checked even when an earlier one
 fails. Exit status is 0 on success, 1 for compilation/checking or input failures,
 and 2 for invalid command options. The default policy is `fail-on-mismatch`;
-`--policy` accepts any of the four policies below. `--/external-signatures` and
+`--policy` accepts any of the four policies below.
+`--/check-unreachable` disables unreachable-code diagnostics. `--/external-signatures` and
 `--/check-methods` disable the corresponding checks. Module search paths can be
 provided through `RAKULIB` as usual. Interpreter `-I` search paths are also
 forwarded to the compiler:
@@ -65,7 +66,8 @@ compile-time activity (`BEGIN`, `CHECK`, imports, etc.) still runs.
 | `fail-on-unverifiable` | Incompatibilities and inconclusive checks | Compilation failure |
 
 All four accept an optional positional `RakuAST::CompUnit` (default `$*CU`)
-and the Boolean options `:external-signatures` and `:check-methods` (both default to `True`):
+and the Boolean options `:external-signatures`, `:check-methods`, and
+`:check-unreachable` (all default to `True`):
 
 ```raku
 CHECK warn-on-unverifiable($*CU, :!external-signatures);
@@ -91,7 +93,23 @@ This option only suppresses missing-method diagnostics. Existing method argument
 checks remain active, and an unknown method return used in a typed assignment
 can still be inconclusive under a strict policy.
 
-Diagnostics contain `[static:mismatch]` or `[static:unverifiable]`, source
+Code proven unreachable after a terminating expression is reported as
+`[static:unreachable]` by all four policies: warnings for `warn-*`, compilation
+failure for `fail-*`. Only the first executable statement in each unreachable
+region is reported. Routine, package, handler and phaser declarations are not
+classified as dead executable statements. Disable this diagnostic with
+`CHECK fail-on-mismatch(:!check-unreachable)` or CLI `--/check-unreachable`.
+Disabling diagnostics does not make unreachable statements affect inference.
+
+```raku
+sub example() {
+    return 42;
+    say "unreachable"; # [static:unreachable]
+}
+```
+
+Diagnostics contain `[static:mismatch]`, `[static:unverifiable]`, or
+`[static:unreachable]`, source
 file/line when available, and the relevant types or reason for uncertainty.
 Warnings continue compilation and can be handled with Raku's usual warning
 handlers. Failing modes collect selected problems and register a
@@ -103,6 +121,14 @@ All checkers return the selected diagnostics as a `List`.
 The exception can be imported as `CheckFailure` with `use static :DEFAULT, :types`.
 
 ## Inference
+
+Constant conditions eliminate unreachable branches, including ternaries,
+statement modifiers and short-circuit expressions. Supported nominal type tests
+and CORE `.defined` tests refine branch-local facts; primitive integer comparisons
+also establish inclusive bounds used by later arithmetic and predicates.
+Assignments and potentially mutating calls invalidate those assumptions.
+Custom `ACCEPTS` and potentially overridden `.defined` methods do not establish
+nominal or definedness refinements.
 
 The checker tracks lexical declarations by identity, initializations,
 assignments, branch joins, bounded loop iteration, calls and return paths.
@@ -145,15 +171,38 @@ considered. Direct `::T` captures are bound across arguments and return contract
 nominally more specific multi candidates are preferred when that ordering is
 statically established. Typed hash keys and lexical aliases are checked too.
 
-The no-argument CORE `.pick` and `.roll` on exact built-in lists and arrays retain the
-possible element types, including `Nil` when the collection may be empty.
-For example, `("bla", 42).pick` or `("bla", 42).roll` can return `Str` or `Int`, so each violates a
-declared `--> Int` return contract. Selection is not executed by the analyzer.
-Count arguments and custom implementations use normal method analysis.
+CORE `.pick` and `.roll` on known built-in lists and arrays retain possible
+element types, including `Nil` for a possibly empty scalar selection.
+`("bla", 42).pick` and `.roll` can return `Str` or `Int`, so each violates a
+`--> Int` return contract. Integer count arguments and `*` produce sequence
+facts with element contracts and a known cardinality when established; random
+order is never invented, and nonempty `.roll(*)` is recorded as infinite.
+
+CORE `map`, `grep` and `first` analyze known single-element callbacks, including
+inline blocks, routine references and single-argument Whatever expressions.
+Finite inputs retain exact results when established, up to 256 elements;
+larger inputs use element summaries. Lazy sequences and finite captures lose
+content assumptions when a known source or alias changes. Analysis never
+executes callbacks. Mutable
+captures use declared contracts and callback writes invalidate caller assumptions.
+`pop` and `shift` track known removed elements and update shared container
+references. Empty removal yields `Failure`, whose use in a typed assignment is
+checked. Functional CORE forms of `map`, `grep`, `first`, `pick`, `roll`, `pop` and `shift` use
+these rules too. Custom methods retain ordinary dispatch analysis.
+
+Known lexical routine references and parenthesized callable expressions are
+checked through their resolved signatures and local return summaries. Known
+closures also bind positional/named/slurpy arguments and propagate captured
+writes. Deferred callbacks with nonlocal returns remain inconclusive. Finite
+captures can supply both positional and named arguments through `|`. Direct
+`::T` captures can be substituted recursively into built-in `Array`, `List`,
+`Positional`, `Hash` and `Associative` contracts, including nested parameters.
+Actual container contracts are respected: an untyped `[1]` is not `Array[Int]`.
 
 Simple local `where`/subset predicates are analyzed using primitive constants,
 comparisons, arithmetic, Boolean combinations, intervals, type junctions,
-`*.chars`, `*.defined`, and known collection lengths. For example:
+`*.chars`, `*.defined`, known collection lengths, and references to previously
+bound signature parameters. For example:
 
 ```raku
 sub positive(Int $x where * > 0) { $x }
@@ -179,7 +228,10 @@ Container and effect checks also cover:
 - `given`/`when`/`default` paths with known type, literal or Boolean conditions;
   `try`, `CATCH` and `CONTROL` bodies, including explicit returns and loss of
   value assumptions after exceptional paths. Arbitrary smartmatch predicates
-  and exact exception selection/resumption are not proven.
+  and exact resumption are not proven. Known exceptions from explicit `die`
+  and local callees select compatible nominal `CATCH` arms; unknown external
+  exceptions retain conservative possibilities. Returns, throws and process
+  exit are tracked separately; `try` consumes exceptional paths.
 - The elements yielded by `gather`/`take`, values of `start` observed through
   `await` or `.result`, and `supply`/`emit` values checked against inline `tap`
   callback signatures. Mutable captures use declared contracts rather than
@@ -189,6 +241,12 @@ Container and effect checks also cover:
   finite compatible shapes. Unequal shapes, recycling and unknown operands
   remain inconclusive.
 
+Collection callbacks with multi-element batching, dynamic counts, arbitrary
+Slip flattening and custom iteration protocols can remain inconclusive. Callback
+analysis is limited to 16 nested applications and generic substitution to depth
+32. Exceptions from deferred producers are retained for Promise observation;
+scheduling, race freedom and termination are not established.
+
 This is a conservative analyzer, not a proof system for arbitrary Raku:
 
 - Predicates outside that allowlist, or predicates depending on unknown
@@ -197,14 +255,14 @@ This is a conservative analyzer, not a proof system for arbitrary Raku:
 - Native integer storage follows Raku wrapping semantics: e.g. assigning 300
   to `int8` yields 44, not a type error. That stored constant is used in later
   checks. Floating-point narrowing loses constant precision conservatively.
-- Value-dependent dispatch, argument flattening, indirect calls, dynamic
+- Unresolved value-dependent dispatch, dynamic argument flattening, unknown indirect calls, dynamic
   invocants, unsupported AST constructs, and external routines without useful
   return contracts can be inconclusive.
 - Collection reads may be missing. Recognized mutation, captured assignments,
   and mutable call arguments invalidate constant-content assumptions while
   retaining declared element/key contracts. Fixed array dimensions, structured
   initialization and constant index bounds are checked; dynamic dimensions or
-  indices remain inconclusive. Nested generic resolution and complete
+  indices remain inconclusive. Custom generic parameterizers and complete
   alias/effect analysis remain inconclusive. Reflective changes are not modeled
   as exact contents.
 - Runtime subclass dispatch and mutable captured values can require information

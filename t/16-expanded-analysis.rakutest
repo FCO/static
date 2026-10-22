@@ -1,0 +1,102 @@
+use Test;
+use lib 't/lib';
+use Compile;
+
+my @cases =
+    ['defined modifier uses definedness', 'sub f {return 1 with 0; 2}', 'unreachable'],
+    ['undefined modifier uses definedness', 'sub f {return 1 without Int; 2}', 'unreachable'],
+    ['phaser after return', 'sub text {"bad"}; sub f {return 1; INIT {my Int $x=text()}}', 'mismatch'],
+    ['phaser after dead statement', 'sub text {"bad"}; sub f {return 1; 2; INIT {my Int $x=text()}}', 'mismatch'],
+    ['terminating callee', 'sub stop {die "x"}; sub f {stop(); 2}', 'unreachable'],
+    ['mixed terminating callee', 'sub stop(Bool $b) {$b ?? die("x") !! exit(1)}; sub f {stop(True); 2}', 'unreachable'],
+    ['lazy functional mutation', 'my @a=1,2; my $s=map -> $x {$x}, @a; @a[0]="bad"; my Int @b=$s', 'unverifiable'],
+    ['lazy scalar source mutation', 'my $x=1; my $s=($x,2).map(-> $a {$a}); $x="bad"; my Int @b=$s', 'unverifiable'],
+    ['mutable capture invalidation', 'my $x=1; my $c=\($x); $x="bad"; sub f(Int $a) {1}; f(|$c)', 'unverifiable'],
+    ['lazy source mutation', 'my @a=1,2; my $s=@a.map(-> $x {$x}); @a[0]="bad"; my Int @b=$s', 'unverifiable'],
+    ['lazy source alias mutation', 'my @a=1,2; my $b=@a; my $s=@a.map(-> $x {$x}); $b[0]="bad"; my Int @out=$s', 'unverifiable'],
+    ['lazy transitive mutation', 'my @a=1,2; my $s=@a.map(*+1).map(*+1); @a.pop; my Int @out=$s', 'unverifiable'],
+    ['bounds invalidated', 'sub pos(Int $x where * > 0) {1}; sub change(Int $x is rw) {$x=-1}; sub f(Int $x is rw) {if $x>0 {change($x); pos($x)}}', 'unverifiable'],
+    ['custom ACCEPTS not a nominal test', 'class C {method ACCEPTS($) {True}}; sub f(Cool $x) {if $x ~~ C {my C $c=$x}}', 'mismatch'],
+    ['custom defined dispatch', 'class C is Int {method defined {True}}; sub f(Int $x) {if $x.defined {my Int:D $y=$x}}', 'unverifiable'],
+    ['constant declaration after return', 'sub f {return 1; my constant X=2}', 'ok'],
+    ['closure slurpy arguments', 'my &f=-> *@x {my Int @a=@x}; f(1,"bad")', 'mismatch'],
+    ['closure named default', 'my &f=-> Int :$x=2 {$x+1}; my Int $n=f()', 'ok'],
+    ['closure bad default', 'my &f=-> Int :$x="bad" {$x}; f()', 'mismatch'],
+    ['known closure', 'my &f = -> Int $x {$x+1}; my Int $n=f(1)', 'ok'],
+    ['closure bad arguments', 'my &f = -> Int $x {$x+1}; f("bad")', 'mismatch'],
+    ['closure captured write', 'my $x=1; my &f = {$x="bad"}; f(); my Int $n=$x', 'mismatch'],
+    ['closure nonlocal return', 'sub f(--> Int) {my &g={return "bad"}; g()}; f()', 'mismatch'],
+    ['deferred nonlocal return', 'sub f {my $s=(1,2).map({return "bad"}); 1}', 'unverifiable'],
+    ['generic runtime nested capture', 'sub f(::T $x, Array[T] $a) {1}; sub g(Int $x) {my Int @a; f($x,@a)}', 'unverifiable'],
+    ['unknown control signal', 'sub f() {CONTROL {default {my Int $x="bad"}}; say "x"}; f()', 'mismatch'],
+    ['functional pop', 'my @a=1,"a"; my Str $x=pop @a; my Int $y=pop @a', 'ok'],
+    ['functional shift', 'my @a=1,"a"; my Int $x=shift @a; my Str $y=shift @a', 'ok'],
+    ['grep nominal type', 'my Int @a=("a",1).grep(Int)', 'ok'],
+    ['first nominal type', 'my Int $x=("a",1).first(Int)', 'ok'],
+    ['integer interval', 'sub pos(Int $x where * > 0) {1}; sub f(Int $x) { if $x > 0 { pos($x) } }', 'ok'],
+    ['interval arithmetic', 'sub pos(Int $x where * > 1) {1}; sub f(Int $x) { if $x > 0 { pos($x+1) } }', 'ok'],
+    ['Whatever map', 'my Int @a=(1,2).map(*+1)', 'ok'],
+    ['Whatever grep', 'my Int @a=(1,2).grep(*>1)', 'ok'],
+    ['pick cardinality', 'sub f(Int $x where * == 2) {1}; f((1,2).pick(3).elems)', 'ok'],
+    ['roll cardinality', 'sub f(Int $x where * == 3) {1}; f((1,2).roll(3).elems)', 'ok'],
+    ['typed pick', 'my Int @a=1,2; my Int $x=@a.pick', 'ok'],
+    ['typed roll', 'my Int @a=1,2; my Int $x=@a.roll', 'ok'],
+    ['empty pop assignment', 'my Int $x=[].pop', 'mismatch'],
+    ['empty shift assignment', 'my Int $x=[].shift', 'mismatch'],
+    ['generic container', 'sub f(::T $x, Array[T] $y) {1}; my Int @a=1,2; f(1,@a)', 'ok'],
+    ['nested generic container', 'sub f(::T $x, Array[Array[T]] $y) {1}; my Array[Int] @a; f(1,@a)', 'ok'],
+    ['nested generic mismatch', 'sub f(::T $x, Array[Array[T]] $y) {1}; my Array[Str] @a; f(1,@a)', 'mismatch'],
+    ['generic return container', 'sub f(::T $x, Array[T] $y --> Array[T]) {$y}; my Int @a; my Array[Int] $b=f(1,@a)', 'ok'],
+    ['typed handler selection', 'sub f(--> Int) {die "x"; CATCH {when X::AdHoc {return 1}; when X::IO {return "bad"}}}; my Int $x=f()', 'ok'],
+    ['handler after return', 'sub f(--> Int) {return 1; CATCH {default {return "bad"}}}; my Int $x=f()', 'ok'],
+    ['both branches return', 'sub f(Bool $b) { if $b {return 1} else {return 2}; 3 }', 'unreachable'],
+    ['constant modifier return', 'sub f {return 1 if True; 2}', 'unreachable'],
+    ['constant short circuit', 'False && do {my Int $x="bad"}', 'ok'],
+    ['constant true branch', 'my Int $x = do if True { 1 } else { "bad" }', 'ok'],
+    ['constant false branch', 'my Int $x = False ?? "bad" !! 1', 'ok'],
+    ['unless constant', 'my Int $x = do unless False { 1 }', 'ok'],
+    ['nominal narrowing', 'sub f(Cool $x) { if $x ~~ Int { my Int $i = $x } }', 'ok'],
+    ['defined narrowing', 'sub f(Bool $b) { my $x=$b ?? 1 !! Int; if $x.defined { my Int:D $i = $x } }', 'ok'],
+    ['negated narrowing', 'sub f(Cool $x) { unless !($x ~~ Int) { my Int $i = $x } }', 'ok'],
+    ['capture expansion', 'sub f(Int $x, Str :$s!) {1}; my $c = \(1,:s("a")); f(|$c)', 'ok'],
+    ['bad capture expansion', 'sub f(Int $x, Str :$s!) {1}; my $c = \(1,:s(2)); f(|$c)', 'mismatch'],
+    ['routine reference', 'sub f(Int $x --> Int) {$x}; my &g = &f; my Int $i=g(1)', 'ok'],
+    ['bad routine reference', 'sub f(Int $x --> Int) {$x}; my &g = &f; g("a")', 'mismatch'],
+    ['parenthesized reference', 'sub f(Int $x --> Int) {$x}; my Int $i=(&f)(1)', 'ok'],
+    ['map integers', 'my Int @x=(1,2).map(-> Int $x {$x+1})', 'ok'],
+    ['map wrong elements', 'my Str @x=(1,2).map(-> Int $x {$x+1})', 'mismatch'],
+    ['map bad signature', 'my @x=("a",2).map(-> Int $x {$x+1})', 'mismatch'],
+    ['grep constants', 'my Int @x=(1,2,3).grep(-> Int $x {$x>1})', 'ok'],
+    ['first constant', 'my Int $x=(1,2,3).first(-> Int $x {$x>1})', 'ok'],
+    ['first absent', 'my Int $x=(1,2).first(-> Int $x {$x>10})', 'ok'],
+    ['functional map', 'my Int @x=map -> Int $x {$x+1}, 1,2', 'ok'],
+    ['functional grep', 'my Int @x=grep -> Int $x {$x>1}, 1,2', 'ok'],
+    ['functional first', 'my Int $x=first -> Int $x {$x>1}, 1,2', 'ok'],
+    ['pick count', 'my Int @x=(1,2).pick(1)', 'ok'],
+    ['roll count', 'my Int @x=(1,2).roll(3)', 'ok'],
+    ['roll star', 'my Int @x=(1,2).roll(*)', 'ok'],
+    ['pick empty count', 'my Str @x=(1,2).pick(0)', 'ok'],
+    ['functional pick count', 'my Int @x=pick 1, 1,2', 'ok'],
+    ['functional roll count', 'my Int @x=roll 2, 1,2', 'ok'],
+    ['pop known', 'my @a=1,"a"; my Str $x=@a.pop; my Int $y=@a.pop', 'ok'],
+    ['shift known', 'my @a=1,"a"; my Int $x=@a.shift; my Str $y=@a.shift', 'ok'],
+    ['pop alias', 'my @a=1,"a"; my $b=@a; my Str $x=$b.pop; my Int $y=@a.pop', 'ok'],
+    ['dependent predicate', 'sub f(Int $lo, Int $hi where * > $lo) {1}; f(3,2)', 'mismatch'],
+    ['dependent predicate valid', 'sub f(Int $lo, Int $hi where * > $lo) {1}; f(2,3)', 'ok'];
+
+for @cases -> [$name, $source, $status] {
+    my ($code, $output) = compile($source, :mode<fail-on-unverifiable>);
+    is $code == 0, $status eq 'ok', $name;
+    like $output, /'[static:' $status ']'/, "$name diagnostic" unless $status eq 'ok';
+    diag $output if ($code == 0) != ($status eq 'ok');
+}
+for <warn-on-mismatch warn-on-unverifiable fail-on-mismatch fail-on-unverifiable> -> $mode {
+    my $source = 'sub f {return 1; say "never"}';
+    my ($code, $output) = compile($source, :$mode);
+    is $code == 0, $mode.starts-with('warn'), "$mode unreachable policy";
+    like $output, /'[static:unreachable]'/, "$mode unreachable diagnostic";
+    ($code, $output) = compile($source, :$mode, :options<:!check-unreachable>);
+    is $code, 0, "$mode unreachable opt out";
+    unlike $output, /'[static:unreachable]'/, "$mode opt out suppresses diagnostic";
+}
+done-testing;
