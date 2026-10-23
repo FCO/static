@@ -9,6 +9,7 @@ sub same(Mu $a, Mu $b --> Bool) is export {
 class Fact is export {
     has Mu $.type = Mu;
     has Int $.definite = -1;
+    has Mu $.constraint-type = Mu;
     has Bool $.exact = False;
     has Str $.reason = '';
     has Bool $.bottom = False;
@@ -47,7 +48,7 @@ class Fact is export {
         $!type.^name ~ ($!definite == 1 ?? ':D' !! $!definite == 0 ?? ':U' !! '')
     }
     method key() {
-        (nqp::objectid($!type), $!definite, +$!exact, $!reason, +$!bottom, $!exit-kind,
+        (nqp::objectid($!type), nqp::objectid($!constraint-type), $!definite, +$!exact, $!reason, +$!bottom, $!exit-kind,
          $!exception.defined ?? $!exception.key !! '',
          +$!sequence, +$!finite, $!cardinality, +$!infinite, @!items.map(*.key).join(';'),
          @!alternatives.map(*.key).sort.join('|'),
@@ -63,7 +64,7 @@ sub bottom(Str :$exit-kind = '', Fact :$exception = Fact --> Fact) is export {
     Fact.new(:bottom, :$exit-kind, :$exception)
 }
 sub primitive(Mu $value --> Bool) is export {
-    so (Int, Rat, FatRat, Num, Str, Bool).grep({ same($value.WHAT, $_) }).elems
+    so (Int, Rat, FatRat, Num, Str, Bool, IntStr, RatStr, NumStr, ComplexStr).grep({ same($value.WHAT, $_) }).elems
 }
 sub constant(Mu $value --> Fact) is export {
     return unknown('non-primitive constant') unless primitive($value);
@@ -71,7 +72,7 @@ sub constant(Mu $value --> Fact) is export {
 }
 sub known(Mu $type, Int :$definite = -1, Bool :$exact = False --> Fact) is export {
     if $type.HOW.^name.ends-with('DefiniteHOW') {
-        return Fact.new(:type($type.^base_type), :definite(+$type.^definite), :$exact);
+        return Fact.new(:type($type.^base_type), :constraint-type($type), :definite(+$type.^definite), :$exact);
     }
     my $fact = Fact.new(:$type, :$definite, :$exact);
     # Nil assigned to a scalar means "reset to default" in Raku. Bind the
@@ -97,7 +98,27 @@ sub merge(*@facts --> Fact) is export {
     my @types = @alts.map(*.type);
     my Mu $type = @types.are;
     my @defs = @alts.map(*.definite).unique;
-    Fact.new(:$type, :definite(@defs == 1 ?? @defs[0] !! -1),
+    my %common;
+    my @dependencies;
+    my @shape;
+    if @types.grep({!same($_, @types[0])}).elems == 0 {
+        %common<exact> = @alts.grep({!.exact}).elems == 0;
+        %common<sequence> = @alts.grep({!.sequence}).elems == 0;
+        %common<writable> = @alts.map(*.writable).unique.elems == 1 ?? @alts[0].writable !! -1;
+        %common<identity> = @alts.map(*.identity).unique.elems == 1 ?? @alts[0].identity !! '';
+        @dependencies = @alts.map(*.dependencies).flat.unique;
+        %common<cardinality> = @alts.map(*.cardinality).unique.elems == 1 ?? @alts[0].cardinality !! -1;
+        @shape = @alts[0].shape.List if @alts.map({.shape.join(',')}).unique.elems == 1;
+        %common<key-type> := @alts.grep({!same(.key-type, @alts[0].key-type)}).elems == 0 ?? @alts[0].key-type !! Mu;
+        %common<constraint-type> := @alts.grep({!same(.constraint-type, @alts[0].constraint-type)}).elems == 0
+            ?? @alts[0].constraint-type !! Mu;
+        if @alts.grep({.element !~~ Fact:D}).elems == 0 {
+            my $same-contract = @alts.grep({!.constrained-elements || .element.key ne @alts[0].element.key}).elems == 0;
+            %common<element> = $same-contract ?? @alts[0].element !! merge(|@alts.map(*.element));
+            %common<constrained-elements> = $same-contract;
+        }
+    }
+    Fact.new(:$type, :definite(@defs == 1 ?? @defs[0] !! -1), :dependencies(@dependencies), :shape(@shape), |%common,
         :alternatives(@alts), :reason(@alts.map(*.reason).grep(*.chars).unique.join('; ')))
 }
 
@@ -171,4 +192,10 @@ class Diagnostic is export {
         ~ ($!reason ?? "; $!reason" !! '')
     }
     method gist() { self.Str }
+}
+
+# Element facts retain the original :D/:U contract separately from the nominal
+# type used to describe their values.
+sub element-type(Fact $element --> Mu) is export {
+    same($element.constraint-type, Mu) ?? $element.type !! $element.constraint-type
 }

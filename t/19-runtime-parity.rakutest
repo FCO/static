@@ -1,0 +1,113 @@
+use Test;
+use lib 't/lib';
+use Compile;
+
+# All inputs are controlled, finite, side-effect-free programs. The native
+# interpreter is an independent oracle for these concrete binding outcomes.
+my @sources;
+for <Int Int:D Int:U> -> $type {
+    for '1', '"bad"', 'Int', 'Nil' -> $value {
+        @sources.push($_.subst('TYPE', $type).subst('VALUE', $value)) for
+            'my TYPE @a=VALUE;',
+            'my TYPE @a; @a.push(VALUE);',
+            'my TYPE @a; @a[0]=VALUE;';
+    }
+}
+for 2, 3, 4 -> $width {
+    for ^7 -> $size {
+        my @parameters = (^$width).map({'$' ~ (97+$_).chr});
+        my $parameters = @parameters.join(',');
+        my $body = @parameters.join('+');
+        my $values = (1..$size).join(',');
+        @sources.push('my Int $x=(' ~ $values ~ ').reduce(-> ' ~ $parameters ~ ' {' ~ $body ~ '});');
+        @sources.push('my Int $x=(1,).reduce(-> ' ~ $parameters ~ ' {' ~ $body ~ '});') if $size == 1;
+    }
+}
+for -1, 0, 2, 3, 4 -> $start {
+    for -1, 0, 2 -> $length {
+        @sources.push('my Str $s="abc".substr(' ~ $start ~ ',' ~ $length ~ ');');
+    }
+}
+for '1', '"bad"', 'Int', 'Nil' -> $value {
+    @sources.push('class C {has Int @.a}; C.new(a=>[' ~ $value ~ ']);');
+}
+for <Int Int:D> -> $type {
+    for 'Nil', 'Int', '1', '"bad"' -> $value {
+        @sources.push('my TYPE $x is default(5)=1; $x=VALUE;'.subst('TYPE', $type).subst('VALUE', $value));
+    }
+}
+for '()', '1', '1,2', '1,"bad"' -> $source {
+    # 2026.09 only initializes a postfixed declaration on its first item.
+    # Assignment checks each item on both supported compiler versions.
+    @sources.push('my Int $x; $x=$_ for ' ~ $source ~ ';');
+}
+
+@sources.append(
+    'sub f(Bool $b) {my Int @a=1; if $b {@a=2} else {@a=3}; @a.push("bad")}; f(True)',
+    'sub f(Bool $b) {my Int @a=1; if $b {@a=2} else {@a=3}; @a.push(4)}; f(True)',
+    'class C {has Int:D $!x=1; method reset {$!x=Nil}}; C.new.reset',
+    'class C {has Int:D $.x is rw=1}; C.new.x=Nil',
+    'class C {has Int:D $!x is default(5)=1; method reset {$!x=Nil}}; C.new.reset',
+    'class C {has Int:D $.x is rw is default(5)=1}; C.new.x=Nil'
+);
+@sources.append(
+    'class C {has Int @!xs; method bad {@!xs.push("bad")}}; C.new.bad',
+    'class C {has Int %!xs; method bad {%!xs<a>="bad"}}; C.new.bad',
+    'class C {has Int @!xs; method good {@!xs=1,2;1}}; C.new.good',
+    'my constant X=1; X=2',
+    'my Int @a=1,2; @a[0,1]=3,4',
+    'my Int @a=1,2; @a[0,1]=3,"bad"',
+    'my Int @a=1,2; @a[0,1]=3,4,"ignored"',
+    'my Int @a=1,2; @a[()]="ignored"',
+    'my Int @a=1,2; @a[0,1]=3',
+    'my Int:D @a=1,2; @a[0,1]=3',
+    'my Int:D @a is default(5)=1,2; @a[0,1]=3',
+    'my Int %h; %h<a b>=1,2',
+    'my Int %h; %h<a b>=1,"bad"',
+    'my Int %h; %h<a b>=1,2,"ignored"',
+    'my Int @a=<1 2 3>',
+    'my Int @a=<1 bad 3>',
+    'my Str @a=q:v:w/1 2/',
+    'my Int @a=q:v:w/1 2/',
+    'my Str @a=<<a "b c">>',
+    'sub f(--> Int) {(return 1) + do {my Int $x="bad"; 1}}; f()',
+    'sub g($x,$y) {1}; sub f(--> Int) {g((return 1), do {my Int $x="bad"; 1})}; f()',
+    'sub f(--> Int) {for (return 1) {my Int $x="bad"}}; f()',
+    'try {if die "x" {my Int $x="bad"}}'
+);
+for <Int Array List> -> $type {
+    for '[slip(1,2)]', '[slip()]', '(slip(1,2),3)', '[slip([1,2],3)]',
+        '[[1,2]]', '[[1,2],]', '[(1,2)]', '[Nil]', '[|1]' -> $expression {
+        @sources.push('my ' ~ $type ~ ' @a=' ~ $expression ~ ';');
+    }
+}
+@sources.append(
+    'sub f(--> Int) {"{return 1}{my Int $x="bad"}"}; f()',
+    'sub f(--> Int) {qq:w[{return 1}{my Int $x="bad"}]}; f()',
+    'sub f(Str:U $s) {my Str:D $x="$s"}; f(Str)',
+    'class A is Array {method push(Str $x --> Int) {1}}; my Int @a is A; my Int $n=@a.push("ok")',
+    'class A is Array {method push(Str $x --> Int) {1}}; my Int @a is A; @a.push(2)',
+    'class A is Array {method sum(--> Str) {"ok"}}; my Int @a is A=1,2; my Str $s=@a.sum',
+    'my $src=[1,2]; my Array @a=[$src]',
+    'my $src=[1,2]; my Int @a=[$src]',
+    'sub f(Int $x, Int $y) {1}; f(slip(1,2))',
+    'sub f() {1}; f(slip())',
+    'sub f() {1}; f(slip(1))',
+    'sub f(Int $x) {1}; f(|1)',
+    'sub f() {1}; f(|1)'
+);
+@sources.append(
+    'sub f(Int $x, Int $y) {1}; f(|slip(1,2))',
+    'sub f() {1}; f(|slip())',
+    'sub f(Slip $x) {1}; f(slip(1,2))'
+);
+for @sources -> $source {
+    my $native = run $*EXECUTABLE, '-e', $source, :out, :err;
+    my $native-output = $native.out.slurp(:close) ~ $native.err.slurp(:close);
+    my ($code, $output) = compile($source, :mode<fail-on-mismatch>);
+    is $code == 0, $native.exitcode == 0, "runtime parity: $source";
+    unlike $output, /'while evaluating a CHECK' | 'Use of uninitialized value'/,
+        'no internal analyzer failure';
+    diag $native-output ~ $output if ($code == 0) != ($native.exitcode == 0);
+}
+done-testing;

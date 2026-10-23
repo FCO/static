@@ -172,6 +172,19 @@ parameterized contracts, subsets, coercion types and native contracts are
 considered. Direct `::T` captures are bound across arguments and return contracts;
 nominally more specific multi candidates are preferred when that ordering is
 statically established. Typed hash keys and lexical aliases are checked too.
+Known callable signature constraints use Raku's signature comparison only when
+all parameter matchers are nominal and free of executable constraints.
+
+Default CORE construction checks omitted required attributes when no custom
+BUILD changes initialization, and checks individual typed array attribute values.
+Generated accessors in local classes retain their element/type and readonly
+contracts on exact instances; explicit methods and virtual overrides keep normal
+dispatch rules. Results of routines without `is rw`/`is raw` are readonly.
+Typed `splice` replacements retain element contracts. Branch joins preserve
+common container contracts while discarding differing exact contents. Collection contracts retain
+`:D`/`:U`, including writes and insertions. `Nil` assignments use compiler-created
+container defaults, so a reset with no defined default can violate `:D`; explicit
+primitive defaults remain available to later checks.
 
 CORE `.pick` and `.roll` on known built-in lists and arrays retain possible
 element types, including `Nil` for a possibly empty scalar selection.
@@ -191,7 +204,10 @@ captures use declared contracts and callback writes invalidate caller assumption
 `pop` and `shift` track known removed elements and update shared container
 references. Empty removal yields `Failure`, whose use in a typed assignment is
 checked. Functional CORE forms of `map`, `grep`, `first`, `pick`, `roll`, `pop` and `shift` use
-these rules too. `reduce` checks accumulator callbacks; `classify` and `categorize`
+these rules too. Collection mutation rules require the resolved CORE method;
+overrides use their own signatures and local summaries. Primitive collection
+folding is restricted to canonical CORE collection types. `reduce` checks
+accumulator callbacks, including finite batches with more than two arguments; non-left reducer strategies remain explicit uncertainty; `classify` and `categorize`
 retain known grouped hash entries. Positive constant `rotor` sizes, including
 `:partial`, and functional `zip`/`cross` retain bounded row shapes and cardinality.
 Dynamic defined integer selection counts retain element contracts. Custom methods
@@ -252,6 +268,9 @@ Container and effect checks also cover:
   remain inconclusive.
 
 Finite serial `for` loops bind elements to callback parameters or the topic.
+Postfix `for`/`given` bind the topic; known-empty `for` and false `while`/true
+`until` skip their bodies. Sink-context postfix loops track bounded state, while
+value-context `while`/`until` retain lazy payloads and invalidate deferred writes.
 Known conditions and bounded state transitions model empty loops, repeat loops,
 `last`/`next`, always-returning paths and simple infinite loops. Enumeration and
 loop simulation are limited to 256 steps; other loops use conservative widening.
@@ -266,6 +285,27 @@ reflective dispatch and nonlocal returns from deferred callbacks can remain inco
 analysis is limited to 16 nested applications and generic substitution to depth
 32. Exceptions from deferred producers are retained for Promise observation;
 scheduling, race freedom and termination are not established.
+
+Known integer `div`, `%` and `%%` with a zero denominator, and primitive
+`substr` bounds violations, retain their Failure result rather than invent a
+successful numeric/string value. A caller can intentionally retain a Failure;
+using it in an incompatible typed assignment is checked. Known negative CORE
+positional indices are rejected. Finite positional and hash slices validate each
+selected container, ignore excess right-hand values, and apply container defaults
+to missing values. Private aggregate attributes retain their element/key contracts.
+Constant bindings are readonly; mutating the object held by a constant is a
+separate operation. Bounded list/array composition expands Slips and retains
+scalar-container and trailing-comma grouping. Array construction applies its
+own defaults before an outer typed store checks its elements. Known explicitly spread Slips and
+primitive scalar spreads in call arguments expose their actual arity and types.
+
+Expression evaluation stops on a proven return or throw before analyzing later
+operands, arguments, initializers or conditional bodies. Bounded literal word
+quotes retain lists, protected quoted words and CORE numeric allomorphs. Processor
+order is preserved. Command/format processors and dynamic word boundaries remain
+inconclusive; the analyzer never executes quote commands. Interpolation blocks
+run in the current analysis context, preserving captured writes and nonlocal exits. Ordinary interpolation produces a defined
+Str even when its source is an undefined Str.
 
 This is a conservative analyzer, not a proof system for arbitrary Raku:
 

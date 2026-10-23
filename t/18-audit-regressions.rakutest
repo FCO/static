@@ -1,0 +1,107 @@
+use Test;
+use lib 't/lib';
+use Compile;
+
+my @cases =
+    ['array contract survives branch join', 'sub f(Bool $b) {my Int @a=1; if $b {@a=2} else {@a=3}; @a.push("bad")}; f(True)', 'mismatch'],
+    ['array definite contract survives join', 'sub f(Bool $b) {my Int:D @a=1; if $b {@a=2} else {@a=3}; @a.push(Int)}; f(True)', 'mismatch'],
+    ['array matching write after join', 'sub f(Bool $b) {my Int @a=1; if $b {@a=2} else {@a=3}; @a.push(4);1}; f(True)', 'ok'],
+    ['Nil private attribute definedness', 'class C {has Int:D $!x=1; method bad {$!x=Nil}}; C.new.bad', 'mismatch'],
+    ['Nil public accessor definedness', 'class C {has Int:D $.x is rw=1}; C.new.x=Nil', 'mismatch'],
+    ['Nil private attribute default', 'class C {has Int:D $!x is default(5)=1; method reset {$!x=Nil}}; C.new.reset', 'ok'],
+    ['Nil public accessor default', 'class C {has Int:D $.x is rw is default(5)=1}; C.new.x=Nil', 'ok'],
+    ['loop final guard at analysis budget', 'my $x=0; while $x < 256 {my Int $y=$x < 256 ?? 1 !! "bad"; $x++}', 'ok'],
+    ['postfix final guard at analysis budget', 'my $x=0; $x++ while $x < 256; sub f(Int $x where * == 256) {1}; f($x)', 'ok'],
+    ['Nil definite array initializer', 'my Int:D @a=Nil', 'mismatch'],
+    ['singleton list reduce arity', 'my Int $x=(1,).reduce(-> $a,$b {$a+$b})', 'mismatch'],
+    ['scalar reduce arity', 'my Int $x=1.reduce(-> $a,$b {$a+$b})', 'mismatch'],
+    ['scalar reduce matching arity', 'my Int $x=1.reduce(-> $a {$a})', 'ok'],
+    ['definite collection initialization', 'my Int:D @a=Int', 'mismatch'],
+    ['undefined collection initialization', 'my Int:U @a=1', 'mismatch'],
+    ['definite hash write', 'my Int:D %h; %h<a>=Int', 'mismatch'],
+    ['Nil element initialization reset', 'my Int @a=(1,Nil); my Int $x=@a[1]', 'ok'],
+    ['missing element uses explicit default', 'my Int:D @a is default(5)=1; sub f(Int $x where * == 5) {1}; f(@a[5])', 'ok'],
+    ['typed splice replacement', 'my Int @a=1,2; @a.splice(0,1,"bad")', 'mismatch'],
+    ['typed splice replacement list', 'my Int @a=1,2; @a.splice(0,1,["bad"])', 'mismatch'],
+    ['typed splice matching elements', 'my Int @a=1,2; @a.splice(0,1,[3,4])', 'unverifiable'],
+    ['Nil scalar default reset', 'my Int:D $x=1; $x=Nil', 'mismatch'],
+    ['Nil scalar initialization', 'my Int:D $x=Nil', 'mismatch'],
+    ['Nil scalar explicit default', 'my Int:D $x is default(42)=1; $x=Nil; sub f(Int $n where * == 42) {1}; f($x)', 'ok'],
+    ['Nil push resets element default', 'my Int @a=1; @a.push(Nil)', 'ok'],
+    ['Nil indexed reset', 'my Int @a=1; @a[0]=Nil', 'ok'],
+    ['Nil definite element reset', 'my Int:D @a=1; @a[0]=Nil', 'mismatch'],
+    ['Nil definite push reset', 'my Int:D @a=1; @a.push(Nil)', 'mismatch'],
+    ['Nil explicit element default', 'my Int:D @a is default(5)=1; @a.push(Nil)', 'ok'],
+    ['accessor requires instance', 'class C {has Int $.x}; C.x', 'mismatch'],
+    ['method result readonly', 'class C {method x(--> Int) {1}}; C.new.x=2', 'mismatch'],
+    ['routine result readonly', 'sub f(--> Int) {1}; f()=2', 'mismatch'],
+    ['method readonly rw argument', 'class C {method x(--> Int) {1}}; sub f(Int $x is rw) {1}; f(C.new.x)', 'mismatch'],
+    ['routine readonly rw argument', 'sub value(--> Int) {1}; sub f(Int $x is rw) {1}; f(value())', 'mismatch'],
+    ['raw result is not assumed readonly', 'my $x=1; sub f is raw {$x}; f()=2', 'unverifiable'],
+    ['right reducer remains explicit', 'my Int $n=(2,3,2).reduce(&infix:<**>)', 'unverifiable'],
+    ['lazy while does not establish final capture', 'my $x=0; my $s=($x++ while $x < 3); sub f(Int $n where * == 0) {1}; f($x)', 'unverifiable'],
+    ['lazy empty while', 'my Int @xs=("bad" while False)', 'ok'],
+    ['lazy while payload', 'my Int @xs=("bad" while True)', 'mismatch'],
+    ['three argument reduce', 'my Int $n=(1,2,3).reduce(-> $a,$b,$c {$a+$b+$c})', 'ok'],
+    ['three argument reduce fold', 'sub f(Int $n where * == 15) {1}; f((1,2,3,4,5).reduce(-> $a,$b,$c {$a+$b+$c}))', 'ok'],
+    ['three argument reduce trailing batch', 'sub f(Int $n where * == 6) {1}; f((1,2,3,"ignored").reduce(-> $a,$b,$c {$a+$b+$c}))', 'ok'],
+    ['three argument reduce short input', 'my $n=(1,2).reduce(-> $a,$b,$c {$a+$b+$c})', 'mismatch'],
+    ['reduce callback body mismatch', 'my Int $n=(1,2,3).reduce(-> $a,$b,$c {"bad"})', 'mismatch'],
+    ['array attribute initialization', 'class C {has Int @.xs}; C.new(xs=>[1,2])', 'ok'],
+    ['array attribute wrong element', 'class C {has Int @.xs}; C.new(xs=>[1,"bad"])', 'mismatch'],
+    ['array attribute mutation', 'class C {has Int @.xs}; my $c=C.new(xs=>[1]); $c.xs.push("bad")', 'mismatch'],
+    ['array attribute valid mutation', 'class C {has Int @.xs}; my $c=C.new(xs=>[1]); $c.xs.push(2)', 'ok'],
+    ['classify preserves object keys', 'sub f(Int $n where * == 2) {1}; f((1,"1").classify(-> $x {$x}).elems)', 'ok'],
+    ['integer division Failure', 'my Int $x=1 div 0', 'mismatch'],
+    ['integer remainder Failure', 'my Int $x=1 % 0', 'mismatch'],
+    ['integer divisibility Failure', 'my Bool $x=1 %% 0', 'mismatch'],
+    ['Failure can be retained', 'my Failure $x=1 div 0', 'ok'],
+    ['rational division remains Rat', 'my Rat $x=1/0', 'ok'],
+    ['substring start out of range', 'my Str $x="abc".substr(5)', 'mismatch'],
+    ['substring negative start', 'my Str $x="abc".substr(-1)', 'mismatch'],
+    ['substring negative length', 'my Str $x="abc".substr(1,-1)', 'mismatch'],
+    ['substring empty tail', 'my Str $x="abc".substr(3,2)', 'ok'],
+    ['substring Failure retained', 'my Failure $x="abc".substr(5)', 'ok'],
+    ['negative array index', 'my @a=1,2; my $i=-1; my $x=@a[$i]', 'mismatch'],
+    ['negative list index', 'my $a=(1,2); my $i=-1; my $x=$a[$i]', 'mismatch'],
+    ['past end is undefined', 'my @a=1,2; my Any $x=@a[5]', 'ok'],
+    ['required constructor attribute', 'class C {has Int $.x is required}; C.new', 'mismatch'],
+    ['required attribute supplied', 'class C {has Int $.x is required}; C.new(x=>1)', 'ok'],
+    ['inherited required attribute', 'class B {has Int $.x is required}; class C is B {}; C.new', 'mismatch'],
+    ['custom BUILD initializes required attribute', 'class C {has Int $.x is required; submethod BUILD { $!x=1 }}; C.new', 'ok'],
+    ['accessor write contract', 'class C {has Int $.x is rw}; my $c=C.new(x=>1); $c.x="bad"', 'mismatch'],
+    ['accessor write accepted', 'class C {has Int $.x is rw}; my $c=C.new(x=>1); $c.x=2', 'ok'],
+    ['readonly accessor write', 'class C {has Int $.x}; C.new(x=>1).x=2', 'mismatch'],
+    ['accessor read contract', 'class C {has Int $.x}; my Str $s=C.new(x=>1).x', 'mismatch'],
+    ['accessor rw argument', 'class C {has Int $.x is rw}; sub f(Int $x is rw) {$x=2}; f(C.new(x=>1).x)', 'ok'],
+    ['readonly accessor rw argument', 'class C {has Int $.x}; sub f(Int $x is rw) {$x=2}; f(C.new(x=>1).x)', 'mismatch'],
+    ['explicit accessor override', 'class C {has Int $.x; method x(--> Str) {"s"}}; my Str $s=C.new.x', 'ok'],
+    ['callback signature mismatch', 'sub f(&cb:(Int --> Int)) {1}; f(-> Str $x --> Str {"a"})', 'mismatch'],
+    ['callback signature match', 'sub f(&cb:(Int --> Int)) {1}; f(-> Int $x --> Int {$x})', 'ok'],
+    ['callback return signature mismatch', 'sub f(&cb:(Int --> Int)) {1}; f(-> Int $x --> Str {"a"})', 'mismatch'],
+    ['callback arity constraint', 'sub f(&cb:(Int --> Int)) {1}; f(-> Int $x, Int $y --> Int {$x})', 'mismatch'],
+    ['postfix empty for', 'my Int $x="bad" for ()', 'ok'],
+    ['postfix false while', 'my Int $x="bad" while False', 'ok'],
+    ['postfix true until', 'my Int $x="bad" until True', 'ok'],
+    ['postfix nonempty for', 'my Int $x="bad" for 1,2', 'mismatch'],
+    ['postfix for topic', 'my Int $x=$_ for 1,"bad"', 'mismatch'],
+    ['postfix given topic', 'my Int $x=$_ given "bad"', 'mismatch'],
+    ['postfix combined condition', 'my Int $x="bad" if False for 1,2', 'ok'],
+    ['postfix for final state', 'my $x=0; $x++ for 1,2; sub f(Int $n where * == 2) {1}; f($x)', 'ok'],
+    ['postfix bounded while', 'my $x=0; $x++ while $x < 3; sub f(Int $n where * == 3) {1}; f($x)', 'ok'];
+
+for @cases -> [$name, $source, $status] {
+    my ($code, $out) = compile($source, :mode<fail-on-unverifiable>);
+    is $code == 0, $status eq 'ok', $name;
+    like $out, /'[static:' $status ']'/, "$name diagnostic" unless $status eq 'ok';
+    unlike $out, /'while evaluating a CHECK' | 'Use of uninitialized value'/,
+        "$name does not crash or warn internally";
+    diag $out if ($code == 0) != ($status eq 'ok');
+    if $status eq 'unverifiable' {
+        my ($permissive-code, $permissive-out) = compile($source, :mode<fail-on-mismatch>);
+        is $permissive-code, 0, "$name remains accepted by mismatch policy";
+        unlike $permissive-out, /'[static:mismatch]' | 'while evaluating a CHECK'/,
+            "$name does not invent an incompatibility";
+    }
+}
+done-testing;

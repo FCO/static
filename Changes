@@ -1,6 +1,30 @@
 Revision history for static
 
 {{$NEXT}}
+  - Analyze interpolation blocks as immediate code and retain defined Str results
+    for interpolated undefined string sources.
+  - Apply collection mutation/folding intrinsics only to supported CORE methods
+    and collection types; honor custom method contracts.
+  - Expand bounded Slips in literals and explicit argument spreads, preserve array grouping/defaults,
+    and avoid inventing singleton cardinality for unknown composer inputs.
+  - Validate private aggregate attribute writes and finite positional/hash slices,
+    including missing defaults, excess values and readonly constant bindings.
+  - Stop expression inference after proven nonlocal exits in operands, arguments,
+    initializers, loop sources and conditions.
+  - Preserve bounded word-quote processors and CORE numeric allomorphs without
+    invoking command or custom quote processors.
+  - Preserve common container contracts across branch joins without retaining
+    differing exact contents.
+  - Add native-runtime differential regression coverage and check final loop
+    guards at the iteration budget boundary.
+  - Audit required construction, generated accessors, readonly routine results,
+    callback signature constraints, and typed splice replacement elements.
+  - Preserve :D/:U element contracts and compiler-created Nil reset defaults,
+    including primitive explicit defaults and finite singleton array state.
+  - Analyze postfix loop/topic modifiers, empty paths, bounded sink loops and
+    lazy while/until effects; support finite multi-argument left reductions.
+  - Retain Failure results for bounded primitive domain errors and reject
+    known negative CORE positional indices.
   - Reject reachable return/return-rw without an enclosing Routine, including
     eager collection callbacks at unit scope.
   - Analyze finite callback batches, optional arguments and Slip results, plus

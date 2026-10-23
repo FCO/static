@@ -52,3 +52,36 @@ without an enclosing Routine and unexecuted callback paths. Each case also
 checks that analysis produces neither CHECK crashes nor uninitialized warnings.
 These bounded rules do not establish arbitrary runtime dispatch, custom
 iteration, reflective heap effects or deferred control flow.
+
+`t/18-audit-regressions` records iterative audit findings: required attributes,
+custom BUILD exclusions, generated accessor reads/writes, readonly routine
+results, callable signature constraints, postfix modifiers and lazy effects,
+non-binary left reduction, typed array attributes and splice replacements,
+primitive Failure results, negative positional indices, :D/:U collection
+contracts, Nil/default semantics for lexical and attribute containers, and final
+loop guards at the analysis budget boundary, and container contracts after
+branch joins. Cases include valid counterparts and
+explicit uncertainty for dynamic containers and unsupported reducer strategies.
+
+`t/19-runtime-parity` compares checker acceptance with native execution of
+controlled finite programs covering array initialization/writes, :D/:U, Nil
+resets, explicit defaults, reduction arities, substring bounds, array attribute
+initialization and postfix iteration. This is a bounded differential test, not
+a claim of equivalence for arbitrary Raku programs. Postfix parity cases use
+assignment because Rakudo 2026.09 only initializes a postfixed declaration on
+its first item; the analyzer regression separately checks every item.
+
+`t/20-containers-and-exits` covers private typed aggregate mutation, readonly
+constant bindings versus object mutation, finite array/hash slices and defaults,
+word quote processors/allomorphs, and expression evaluation order after returns
+and throws. Native parity also covers representative cases from these groups.
+Command quote processors are only compiled in the regression suite; their
+commands are never run by the checker or by the parity test.
+
+`t/21-interpolation-and-composition` covers interpolation exits/writes and Str
+definedness, custom collection method contracts, bounded Slip expansion in
+literals/calls, scalar and trailing-comma grouping, array construction defaults,
+unknown composer input cardinality, and invalidation of cardinality through
+mutations and branch joins. Native parity includes a matrix of
+composition shapes and typed element contracts plus representative overrides
+and interpolation exits.

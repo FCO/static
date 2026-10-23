@@ -1,0 +1,58 @@
+use Test;
+use lib 't/lib';
+use Compile;
+
+my @cases =
+    ['unflattened Slip is one argument', 'sub f(Slip $x) {1}; f(slip(1,2))', 'ok'],
+    ['unflattened Slip cannot satisfy two arguments', 'sub f(Int $x, Int $y) {1}; f(slip(1,2))', 'mismatch'],
+    ['unflattened empty Slip is one argument', 'sub f() {1}; f(slip())', 'mismatch'],
+    ['branch removal does not retain original cardinality', 'sub f(Bool $b) {my $a=[1,2]; if $b {$a.pop}; sub check(Int $n where * == 2) {1}; check($a.elems)}; f(True)', 'unverifiable'],
+    ['explicit positional Slip expands into arguments', 'sub f(Int $x, Int $y) {1}; f(|slip(1,2))', 'ok'],
+    ['explicit empty Slip contributes no arguments', 'sub f() {1}; f(|slip())', 'ok'],
+    ['Slip exposes excess argument', 'sub f() {1}; f(slip(1))', 'mismatch'],
+    ['Slip checks expanded argument type', 'sub f(Str $x) {1}; f(slip(1))', 'mismatch'],
+    ['prefix scalar spread is one argument', 'sub f(Int $x) {1}; f(|1)', 'ok'],
+    ['prefix scalar spread exposes excess argument', 'sub f() {1}; f(|1)', 'mismatch'],
+    ['unknown composer source does not prove one item', 'sub source(--> Mu) {(1,2)}; my $a=[source()]; sub f(Int $n where * == 1) {1}; f($a.elems)', 'unverifiable'],
+    ['interpolation return stops later blocks', 'sub f(--> Int) {"{return 1}{my Int $x="bad"}"}; f()', 'ok'],
+    ['word interpolation return stops later blocks', 'sub f(--> Int) {qq:w[{return 1}{my Int $x="bad"}]}; f()', 'ok'],
+    ['interpolation executes writes', 'my $x=0; my $s="{$x=2}"; sub f(Int $n where * == 2) {1}; f($x)', 'ok'],
+    ['interpolation outside return target', 'my $s="{return 1}"', 'mismatch'],
+    ['undefined Str interpolates to defined Str', 'sub f(Str:U $s) {my Str:D $x="$s"}; f(Str)', 'ok'],
+    ['unknown Str interpolates to defined Str', 'sub f(Str $s) {my Str:D $x="$s"}; f("a")', 'ok'],
+    ['custom push uses custom contract', 'class A is Array {method push(Str $x --> Int) {1}}; my Int @a is A; my Int $n=@a.push("ok")', 'ok'],
+    ['custom push rejects wrong argument', 'class A is Array {method push(Str $x --> Int) {1}}; my Int @a is A; @a.push(2)', 'mismatch'],
+    ['custom append uses custom contract', 'class A is Array {method append(Str $x --> Int) {1}}; my Int @a is A; my Int $n=@a.append("ok")', 'ok'],
+    ['custom head is not first element', 'class A is Array {method head(--> Str) {"ok"}}; my Int @a is A=1,2; my Str $s=@a.head', 'ok'],
+    ['custom sum is not primitive sum', 'class A is Array {method sum(--> Str) {"ok"}}; my Int @a is A=1,2; my Str $s=@a.sum', 'ok'],
+    ['array literal Slip', 'my Int @a=[slip(1,2)]', 'ok'],
+    ['array literal empty Slip', 'my Int @a=[slip()]', 'ok'],
+    ['list literal Slip', 'my Int @a=(slip(1,2),3)', 'ok'],
+    ['literal bad Slip element', 'my Int @a=[slip(1,"bad")]', 'mismatch'],
+    ['recursive Slip', 'my Int @a=[slip(slip(1,2),3)]', 'ok'],
+    ['scalar Slip still splices', 'my $s=slip(1,2); my Int @a=[$s,3]', 'ok'],
+    ['scalar prefix spread', 'my Int @a=[|1]', 'ok'],
+    ['single array argument flattens', 'my Int @a=[[1,2]]', 'ok'],
+    ['single array variable flattens', 'my @src=1,2; my Int @a=[@src]', 'ok'],
+    ['single parenthesized list flattens', 'my Int @a=[(1,2)]', 'ok'],
+    ['scalar container preserves grouping', 'my $src=[1,2]; my Array @a=[$src]', 'ok'],
+    ['scalar container is not flattened', 'my $src=[1,2]; my Int @a=[$src]', 'mismatch'],
+    ['trailing comma preserves grouping', 'my Array @a=[[1,2],]', 'ok'],
+    ['several array arguments preserve grouping', 'my Array @a=[[1,2],[3,4]]', 'ok'],
+    ['multiargument slip preserves nested array', 'my $s=slip([1,2],3); my Array $a=$s[0]', 'ok'],
+    ['array constructor Nil resets before outer store', 'my Int @a=[Nil]', 'mismatch'],
+    ['list Nil resets in typed outer store', 'my Int @a=(1,Nil)', 'ok'];
+
+for @cases -> [$name,$source,$status] {
+    my ($code,$out) = compile($source,:mode<fail-on-unverifiable>);
+    is $code == 0, $status eq 'ok', $name;
+    like $out, /'[static:' $status ']'/, "$name diagnostic" unless $status eq 'ok';
+    unlike $out, /'while evaluating a CHECK' | 'Use of uninitialized value'/,
+        "$name has no internal error";
+    diag $out if ($code == 0) != ($status eq 'ok');
+    if $status eq 'unverifiable' {
+        my ($permissive-code,$permissive-out)=compile($source,:mode<fail-on-mismatch>);
+        is $permissive-code, 0, "$name remains inconclusive under mismatch policy";
+    }
+}
+done-testing;
